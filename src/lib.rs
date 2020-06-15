@@ -1,5 +1,8 @@
 #[macro_use]
 extern crate async_trait;
+#[cfg(test)]
+#[macro_use]
+extern crate serial_test;
 extern crate simple_error;
 
 use std::convert::From;
@@ -8,9 +11,17 @@ use std::sync::mpsc;
 pub mod backendtest;
 pub mod dynstore;
 pub mod memorystore;
+pub mod redisstore;
 
 type Error = Box<dyn std::error::Error + Send + 'static>;
 type Result<T> = std::result::Result<T, Error>;
+
+#[macro_export]
+macro_rules! box_try {
+    ($e:expr) => {{
+        $e.map_err(|e| -> Error { Box::new(e) })?
+    }};
+}
 
 pub enum Arg<'a> {
     Owned(Vec<u8>),
@@ -58,6 +69,12 @@ impl<'a> Into<Arg<'a>> for &'a str {
     }
 }
 
+impl Into<Arg<'static>> for String {
+    fn into(self) -> Arg<'static> {
+        Arg::Owned(self.as_bytes().to_vec())
+    }
+}
+
 impl<'a> Into<Arg<'a>> for &'a String {
     fn into(self) -> Arg<'a> {
         Arg::Borrowed(self.as_bytes())
@@ -92,6 +109,10 @@ impl PartialEq<Value> for &str {
 }
 
 impl Value {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
     pub fn into_vec(self) -> Vec<u8> {
         self.0
     }
@@ -103,74 +124,42 @@ impl Value {
 
 #[async_trait]
 pub trait Backend {
-    type BatchOperation: BatchOperation + Send;
-    type AtomicWriteOperation: AtomicWriteOperation + Send;
-
     async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>>;
-    async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &self,
-        key: K,
-        value: V,
-    ) -> Result<()>;
-    async fn set_eq<
-        'a,
-        'b,
-        'c,
-        K: Into<Arg<'a>> + Send,
-        V: Into<Arg<'b>> + Send,
-        OV: Into<Arg<'c>> + Send,
-    >(
+    async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
+    async fn set_eq<'a, 'b, 'c, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(
         &self,
         key: K,
         value: V,
         old_value: OV,
     ) -> Result<bool>;
-    async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &self,
-        key: K,
-        value: V,
-    ) -> Result<bool>;
+    async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool>;
     async fn delete<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<bool>;
 
-    async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &self,
-        key: K,
-        value: V,
-    ) -> Result<()>;
+    async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
     async fn s_members<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Vec<Value>>;
 
-    async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &self,
-        key: K,
-        value: V,
-        score: f64,
-    ) -> Result<()>;
-    async fn z_count<'a, K: Into<Arg<'a>> + Send>(
-        &self,
-        key: K,
-        min: f64,
-        max: f64,
-    ) -> Result<usize>;
-    async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(
-        &self,
-        key: K,
-        min: f64,
-        max: f64,
-        limit: usize,
-    ) -> Result<Vec<Value>>;
-    async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(
-        &self,
-        key: K,
-        min: f64,
-        max: f64,
-        limit: usize,
-    ) -> Result<Vec<Value>>;
+    async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()>;
+    async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize>;
+    async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
+    async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
 
-    fn new_batch(&self) -> Self::BatchOperation;
-    async fn exec_batch(&self, op: Self::BatchOperation) -> Result<()>;
+    async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
+        for op in op.ops {
+            match op {
+                BatchSubOperation::Get(key, tx) => {
+                    let v = self.get(key).await?;
+                    match tx.try_send(v) {
+                        Ok(_) => {}
+                        Err(mpsc::TrySendError::Disconnected(_)) => {}
+                        Err(e) => return Err(Box::new(e)),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
-    fn new_atomic_write(&self) -> Self::AtomicWriteOperation;
-    async fn exec_atomic_write(&self, op: Self::AtomicWriteOperation) -> Result<bool>;
+    async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool>;
 }
 
 pub struct GetResult {
@@ -188,8 +177,24 @@ impl GetResult {
     }
 }
 
-pub trait BatchOperation {
-    fn get<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K) -> GetResult;
+pub enum BatchSubOperation<'a> {
+    Get(Arg<'a>, mpsc::SyncSender<Option<Value>>),
+}
+
+pub struct BatchOperation<'a> {
+    pub ops: Vec<BatchSubOperation<'a>>,
+}
+
+impl<'a> BatchOperation<'a> {
+    pub fn new() -> Self {
+        Self { ops: vec![] }
+    }
+
+    pub fn get<K: Into<Arg<'a>> + Send>(&mut self, key: K) -> GetResult {
+        let (ret, tx) = GetResult::new();
+        self.ops.push(BatchSubOperation::Get(key.into(), tx));
+        ret
+    }
 }
 
 pub struct ConditionalResult {
@@ -207,52 +212,63 @@ impl ConditionalResult {
     }
 }
 
-pub trait AtomicWriteOperation {
-    fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&mut self, key: K, value: V);
-    fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &mut self,
-        key: K,
-        value: V,
-    ) -> ConditionalResult;
-    fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &mut self,
-        key: K,
-        value: V,
-        score: f64,
-    );
-    fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&mut self, key: K, value: V);
-    fn delete<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K);
-    fn delete_xx<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K) -> ConditionalResult;
-    fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&mut self, key: K, value: V);
-    fn s_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&mut self, key: K, value: V);
+pub enum AtomicWriteSubOperation<'a> {
+    Set(Arg<'a>, Arg<'a>),
+    SetNX(Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
+    ZAdd(Arg<'a>, Arg<'a>, f64),
+    ZRem(Arg<'a>, Arg<'a>),
+    Delete(Arg<'a>),
+    DeleteXX(Arg<'a>, mpsc::SyncSender<bool>),
+    SAdd(Arg<'a>, Arg<'a>),
+    SRem(Arg<'a>, Arg<'a>),
 }
 
-// FallbackBatchOperation provides a suitable fallback for stores that don't supported optimized
-// batching.
-pub struct FallbackBatchOperation {
-    gets: Vec<(Vec<u8>, mpsc::SyncSender<Option<Value>>)>,
+// DynamoDB can't do more than 25 operations in an atomic write so all backends should enforce this
+// limit.
+pub const MAX_ATOMIC_WRITE_SUB_OPERATIONS: usize = 25;
+
+pub struct AtomicWriteOperation<'a> {
+    pub ops: Vec<AtomicWriteSubOperation<'a>>,
 }
 
-impl FallbackBatchOperation {
-    pub async fn exec<B: Backend>(self, backend: &B) -> Result<()> {
-        for (k, tx) in self.gets.into_iter() {
-            let v = backend.get(k).await?;
-            tx.try_send(v).map_err(|e| -> Error { Box::new(e) })?;
-        }
-        Ok(())
-    }
-}
-
-impl FallbackBatchOperation {
+impl<'a> AtomicWriteOperation<'a> {
     pub fn new() -> Self {
-        FallbackBatchOperation { gets: vec![] }
+        Self { ops: vec![] }
     }
-}
 
-impl BatchOperation for FallbackBatchOperation {
-    fn get<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K) -> GetResult {
-        let (ret, tx) = GetResult::new();
-        self.gets.push((key.into().into_vec(), tx));
+    pub fn set<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
+        self.ops.push(AtomicWriteSubOperation::Set(key.into(), value.into()));
+    }
+
+    pub fn set_nx<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) -> ConditionalResult {
+        let (ret, tx) = ConditionalResult::new();
+        self.ops.push(AtomicWriteSubOperation::SetNX(key.into(), value.into(), tx));
         ret
+    }
+
+    pub fn z_add<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V, score: f64) {
+        self.ops.push(AtomicWriteSubOperation::ZAdd(key.into(), value.into(), score));
+    }
+
+    pub fn z_rem<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
+        self.ops.push(AtomicWriteSubOperation::ZRem(key.into(), value.into()));
+    }
+
+    pub fn delete<'k: 'a, K: Into<Arg<'k>> + Send>(&mut self, key: K) {
+        self.ops.push(AtomicWriteSubOperation::Delete(key.into()));
+    }
+
+    pub fn delete_xx<'k: 'a, K: Into<Arg<'k>> + Send>(&mut self, key: K) -> ConditionalResult {
+        let (ret, tx) = ConditionalResult::new();
+        self.ops.push(AtomicWriteSubOperation::DeleteXX(key.into(), tx));
+        ret
+    }
+
+    pub fn s_add<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
+        self.ops.push(AtomicWriteSubOperation::SAdd(key.into(), value.into()));
+    }
+
+    pub fn s_rem<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
+        self.ops.push(AtomicWriteSubOperation::SRem(key.into(), value.into()));
     }
 }

@@ -1,4 +1,4 @@
-use super::{Arg, ConditionalResult, FallbackBatchOperation, Result, Value};
+use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, Result, Value, MAX_ATOMIC_WRITE_SUB_OPERATIONS};
 use simple_error::SimpleError;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
@@ -20,147 +20,23 @@ pub struct Backend {
     m: Mutex<HashMap<Vec<u8>, MapEntry>>,
 }
 
-enum Condition {
-    KeyExists(Vec<u8>),
-    KeyDoesNotExist(Vec<u8>),
-}
-
-enum Operation {
-    Set(Vec<u8>, Vec<u8>),
-    ZAdd(Vec<u8>, Vec<u8>, f64),
-    ZRem(Vec<u8>, Vec<u8>),
-    Delete(Vec<u8>),
-    SAdd(Vec<u8>, Vec<u8>),
-    SRem(Vec<u8>, Vec<u8>),
-}
-
-pub struct AtomicWriteOperation {
-    conds: Vec<(Condition, mpsc::SyncSender<bool>)>,
-    ops: Vec<Operation>,
-}
-
-impl AtomicWriteOperation {
-    fn new() -> Self {
-        AtomicWriteOperation {
-            conds: vec![],
-            ops: vec![],
-        }
-    }
-}
-
-impl super::AtomicWriteOperation for AtomicWriteOperation {
-    fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&mut self, key: K, value: V) {
-        self.ops.push(Operation::Set(
-            key.into().into_vec(),
-            value.into().into_vec(),
-        ));
-    }
-
-    fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &mut self,
-        key: K,
-        value: V,
-    ) -> ConditionalResult {
-        let key = key.into().into_vec();
-        let (ret, tx) = ConditionalResult::new();
-        self.conds
-            .push((Condition::KeyDoesNotExist(key.clone()), tx));
-        self.ops.push(Operation::Set(key, value.into().into_vec()));
-        ret
-    }
-
-    fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &mut self,
-        key: K,
-        value: V,
-        score: f64,
-    ) {
-        self.ops.push(Operation::ZAdd(
-            key.into().into_vec(),
-            value.into().into_vec(),
-            score,
-        ));
-    }
-
-    fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &mut self,
-        key: K,
-        value: V,
-    ) {
-        self.ops.push(Operation::ZRem(
-            key.into().into_vec(),
-            value.into().into_vec(),
-        ));
-    }
-
-    fn delete<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K) {
-        self.ops.push(Operation::Delete(key.into().into_vec()));
-    }
-
-    fn delete_xx<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K) -> ConditionalResult {
-        let key = key.into().into_vec();
-        let (ret, tx) = ConditionalResult::new();
-        self.conds.push((Condition::KeyExists(key.clone()), tx));
-        self.ops.push(Operation::Delete(key));
-        ret
-    }
-
-    fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &mut self,
-        key: K,
-        value: V,
-    ) {
-        self.ops.push(Operation::SAdd(
-            key.into().into_vec(),
-            value.into().into_vec(),
-        ));
-    }
-
-    fn s_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &mut self,
-        key: K,
-        value: V,
-    ) {
-        self.ops.push(Operation::SRem(
-            key.into().into_vec(),
-            value.into().into_vec(),
-        ));
-    }
-}
-
 impl Backend {
     pub fn new() -> Self {
-        Self {
-            m: Mutex::new(HashMap::new()),
-        }
+        Self { m: Mutex::new(HashMap::new()) }
     }
 
-    fn get<'a, K: Into<Arg<'a>> + Send>(
-        m: &mut HashMap<Vec<u8>, MapEntry>,
-        key: K,
-    ) -> Option<Value> {
+    fn get<'a, K: Into<Arg<'a>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K) -> Option<Value> {
         match m.get(key.into().as_bytes()) {
             Some(MapEntry::Value(v)) => Some(v.clone().into()),
             _ => None,
         }
     }
 
-    fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        m: &mut HashMap<Vec<u8>, MapEntry>,
-        key: K,
-        value: V,
-    ) {
-        m.insert(
-            key.into().into_vec(),
-            MapEntry::Value(value.into().into_vec()),
-        );
+    fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, value: V) {
+        m.insert(key.into().into_vec(), MapEntry::Value(value.into().into_vec()));
     }
 
-    fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        m: &mut HashMap<Vec<u8>, MapEntry>,
-        key: K,
-        value: V,
-    ) -> Result<()> {
+    fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, value: V) -> Result<()> {
         let key = key.into();
         let value = value.into().into_vec();
         match m.get_mut(key.as_bytes()) {
@@ -172,20 +48,12 @@ impl Backend {
                 s.insert(value);
                 m.insert(key.into_vec(), MapEntry::Set(s));
             }
-            _ => {
-                return Err(Box::new(SimpleError::new(
-                    "attempt to add member to existing non-set value",
-                )))
-            }
+            _ => return Err(Box::new(SimpleError::new("attempt to add member to existing non-set value"))),
         }
         Ok(())
     }
 
-    fn s_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        m: &mut HashMap<Vec<u8>, MapEntry>,
-        key: K,
-        value: V,
-    ) -> Result<()> {
+    fn s_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, value: V) -> Result<()> {
         let key = key.into();
         let value = value.into();
         match m.get_mut(key.as_bytes()) {
@@ -197,12 +65,7 @@ impl Backend {
         Ok(())
     }
 
-    fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        m: &mut HashMap<Vec<u8>, MapEntry>,
-        key: K,
-        value: V,
-        score: f64,
-    ) -> Result<()> {
+    fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, value: V, score: f64) -> Result<()> {
         let key = key.into();
         let value = value.into();
         match m.get_mut(key.as_bytes()) {
@@ -213,10 +76,7 @@ impl Backend {
                 }
 
                 s.scores_by_member.insert(value.to_vec(), score);
-                s.m.insert(
-                    [&float_sort_key(score), value.as_bytes()].concat(),
-                    value.into_vec(),
-                );
+                s.m.insert([&float_sort_key(score), value.as_bytes()].concat(), value.into_vec());
             }
             None => {
                 let mut s = SortedSet {
@@ -224,26 +84,15 @@ impl Backend {
                     m: BTreeMap::new(),
                 };
                 s.scores_by_member.insert(value.to_vec(), score);
-                s.m.insert(
-                    [&float_sort_key(score), value.as_bytes()].concat(),
-                    value.into_vec(),
-                );
+                s.m.insert([&float_sort_key(score), value.as_bytes()].concat(), value.into_vec());
                 m.insert(key.into_vec(), MapEntry::SortedSet(s));
             }
-            _ => {
-                return Err(Box::new(SimpleError::new(
-                    "attempt to add sorted set member to existing non-sorted-set value",
-                )))
-            }
+            _ => return Err(Box::new(SimpleError::new("attempt to add sorted set member to existing non-sorted-set value"))),
         }
         Ok(())
     }
 
-    fn z_rem<'a, K: Into<Arg<'a>> + Send, V: Into<Arg<'a>> + Send>(
-        m: &mut HashMap<Vec<u8>, MapEntry>,
-        key: K,
-        value: V,
-    ) -> Result<()> {
+    fn z_rem<'a, K: Into<Arg<'a>> + Send, V: Into<Arg<'a>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, value: V) -> Result<()> {
         let key = key.into();
         let value = value.into();
         match m.get_mut(key.as_bytes()) {
@@ -290,31 +139,17 @@ fn float_sort_key_after(f: f64) -> Option<[u8; 8]> {
 
 #[async_trait]
 impl super::Backend for Backend {
-    type BatchOperation = FallbackBatchOperation;
-    type AtomicWriteOperation = AtomicWriteOperation;
-
     async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>> {
         let mut m = self.m.lock().unwrap();
         Ok(Self::get(&mut m, key))
     }
 
-    async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &self,
-        key: K,
-        value: V,
-    ) -> Result<()> {
+    async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let mut m = self.m.lock().unwrap();
         Ok(Self::set(&mut m, key, value))
     }
 
-    async fn set_eq<
-        'a,
-        'b,
-        'c,
-        K: Into<Arg<'a>> + Send,
-        V: Into<Arg<'b>> + Send,
-        OV: Into<Arg<'c>> + Send,
-    >(
+    async fn set_eq<'a, 'b, 'c, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(
         &self,
         key: K,
         value: V,
@@ -334,11 +169,7 @@ impl super::Backend for Backend {
         Ok(false)
     }
 
-    async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &self,
-        key: K,
-        value: V,
-    ) -> Result<bool> {
+    async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
         let mut m = self.m.lock().unwrap();
         let key = key.into();
         if !m.contains_key(key.as_bytes()) {
@@ -354,11 +185,7 @@ impl super::Backend for Backend {
         Ok(Self::delete(&mut m, key))
     }
 
-    async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &self,
-        key: K,
-        value: V,
-    ) -> Result<()> {
+    async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let mut m = self.m.lock().unwrap();
         Self::s_add(&mut m, key, value)
     }
@@ -373,32 +200,16 @@ impl super::Backend for Backend {
         Ok(vec![])
     }
 
-    async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
-        &self,
-        key: K,
-        value: V,
-        score: f64,
-    ) -> Result<()> {
+    async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
         let mut m = self.m.lock().unwrap();
         Self::z_add(&mut m, key, value, score)
     }
 
-    async fn z_count<'a, K: Into<Arg<'a>> + Send>(
-        &self,
-        key: K,
-        min: f64,
-        max: f64,
-    ) -> Result<usize> {
+    async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         Ok(self.z_range_by_score(key, min, max, 0).await?.len())
     }
 
-    async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(
-        &self,
-        key: K,
-        min: f64,
-        max: f64,
-        limit: usize,
-    ) -> Result<Vec<Value>> {
+    async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let m = self.m.lock().unwrap();
         let key = key.into();
 
@@ -420,13 +231,7 @@ impl super::Backend for Backend {
             .collect())
     }
 
-    async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(
-        &self,
-        key: K,
-        min: f64,
-        max: f64,
-        limit: usize,
-    ) -> Result<Vec<Value>> {
+    async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let m = self.m.lock().unwrap();
         let key = key.into();
 
@@ -449,28 +254,37 @@ impl super::Backend for Backend {
             .collect())
     }
 
-    fn new_batch(&self) -> Self::BatchOperation {
-        FallbackBatchOperation::new()
-    }
+    async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {
+        if op.ops.len() > MAX_ATOMIC_WRITE_SUB_OPERATIONS {
+            return Err(Box::new(SimpleError::new("max sub-operation count exceeded")));
+        }
 
-    async fn exec_batch(&self, op: Self::BatchOperation) -> Result<()> {
-        op.exec(self).await
-    }
-
-    fn new_atomic_write(&self) -> Self::AtomicWriteOperation {
-        AtomicWriteOperation::new()
-    }
-
-    async fn exec_atomic_write(&self, op: Self::AtomicWriteOperation) -> Result<bool> {
         let mut m = self.m.lock().unwrap();
 
-        for (cond, tx) in op.conds.into_iter() {
-            let failed = match cond {
-                Condition::KeyExists(key) => !m.contains_key(&key),
-                Condition::KeyDoesNotExist(key) => m.contains_key(&key),
-            };
-            if failed {
-                match tx.try_send(true) {
+        for subop in &op.ops {
+            if let Some(failure_tx) = match subop {
+                AtomicWriteSubOperation::Set(..) => None,
+                AtomicWriteSubOperation::SetNX(key, _, tx) => {
+                    if m.contains_key(key.as_bytes()) {
+                        Some(tx)
+                    } else {
+                        None
+                    }
+                }
+                AtomicWriteSubOperation::ZAdd(..) => None,
+                AtomicWriteSubOperation::ZRem(..) => None,
+                AtomicWriteSubOperation::Delete(..) => None,
+                AtomicWriteSubOperation::DeleteXX(key, tx) => {
+                    if !m.contains_key(key.as_bytes()) {
+                        Some(tx)
+                    } else {
+                        None
+                    }
+                }
+                AtomicWriteSubOperation::SAdd(..) => None,
+                AtomicWriteSubOperation::SRem(..) => None,
+            } {
+                match failure_tx.try_send(true) {
                     Ok(_) => {}
                     Err(mpsc::TrySendError::Disconnected(_)) => {}
                     Err(e) => return Err(Box::new(e)),
@@ -479,24 +293,30 @@ impl super::Backend for Backend {
             }
         }
 
-        for op in op.ops.into_iter() {
-            match op {
-                Operation::Set(key, value) => {
+        for subop in op.ops {
+            match subop {
+                AtomicWriteSubOperation::Set(key, value) => {
                     Self::set(&mut m, key, value);
                 }
-                Operation::Delete(key) => {
+                AtomicWriteSubOperation::SetNX(key, value, _) => {
+                    Self::set(&mut m, key, value);
+                }
+                AtomicWriteSubOperation::Delete(key) => {
                     Self::delete(&mut m, key);
                 }
-                Operation::SAdd(key, value) => {
+                AtomicWriteSubOperation::DeleteXX(key, _) => {
+                    Self::delete(&mut m, key);
+                }
+                AtomicWriteSubOperation::SAdd(key, value) => {
                     Self::s_add(&mut m, key, value)?;
                 }
-                Operation::SRem(key, value) => {
+                AtomicWriteSubOperation::SRem(key, value) => {
                     Self::s_rem(&mut m, key, value)?;
                 }
-                Operation::ZAdd(key, value, score) => {
+                AtomicWriteSubOperation::ZAdd(key, value, score) => {
                     Self::z_add(&mut m, key, value, score)?;
                 }
-                Operation::ZRem(key, value) => {
+                AtomicWriteSubOperation::ZRem(key, value) => {
                     Self::z_rem(&mut m, key, value)?;
                 }
             }

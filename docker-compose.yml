@@ -1,0 +1,13 @@
+version: '3'
+services:
+  dev:
+    image: rust:1.43
+    environment:
+      REDIS_ADDRESS: redis.local:6379
+    links:
+      - redis:redis.local
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+  redis:
+    image: redis

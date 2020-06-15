@@ -8,3 +8,7 @@ edition = "2018"
 async-trait = "0.1.32"
 simple-error = "0.2.1"
 tokio = { version = "0.2.21", features = ["macros", "rt-core"] }
+redis = "0.16.0"
+
+[dev-dependencies]
+serial_test = "0.4.0"
