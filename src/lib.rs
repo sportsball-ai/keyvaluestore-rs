@@ -1,51 +1,81 @@
 #[macro_use]
 extern crate async_trait;
-#[macro_use]
 extern crate simple_error;
 
 use std::convert::From;
 use std::sync::mpsc;
 
 pub mod backendtest;
+pub mod dynstore;
 pub mod memorystore;
 
-type Error = Box<dyn std::error::Error + 'static>;
+type Error = Box<dyn std::error::Error + Send + 'static>;
 type Result<T> = std::result::Result<T, Error>;
 
-pub trait Arg: Send {
-    fn into_arg(self) -> Vec<u8>;
+pub enum Arg<'a> {
+    Owned(Vec<u8>),
+    Borrowed(&'a [u8]),
 }
 
-impl Arg for Vec<u8> {
-    fn into_arg(self) -> Vec<u8> {
-        self
+impl<'a> Arg<'a> {
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Owned(v) => &v,
+            Self::Borrowed(v) => v,
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        match self {
+            Self::Owned(v) => v.clone(),
+            Self::Borrowed(v) => v.to_vec(),
+        }
+    }
+
+    pub fn into_vec(self) -> Vec<u8> {
+        match self {
+            Self::Owned(v) => v,
+            Self::Borrowed(v) => v.to_vec(),
+        }
     }
 }
 
-impl Arg for &str {
-    fn into_arg(self) -> Vec<u8> {
-        self.as_bytes().to_vec()
+impl Into<Arg<'static>> for Vec<u8> {
+    fn into(self) -> Arg<'static> {
+        Arg::Owned(self)
+    }
+}
+
+impl<'a> Into<Arg<'a>> for &'a Vec<u8> {
+    fn into(self) -> Arg<'a> {
+        Arg::Borrowed(&self)
+    }
+}
+
+impl<'a> Into<Arg<'a>> for &'a str {
+    fn into(self) -> Arg<'a> {
+        Arg::Borrowed(self.as_bytes())
+    }
+}
+
+impl<'a> Into<Arg<'a>> for &'a String {
+    fn into(self) -> Arg<'a> {
+        Arg::Borrowed(self.as_bytes())
     }
 }
 
 #[derive(Debug, PartialEq, PartialOrd, Ord, Eq)]
 pub struct Value(Vec<u8>);
 
-impl From<Vec<u8>> for Value {
-    fn from(v: Vec<u8>) -> Self {
-        Self(v)
+impl<T: Into<Vec<u8>>> From<T> for Value {
+    fn from(v: T) -> Self {
+        Self(v.into())
     }
 }
 
-impl From<&str> for Value {
-    fn from(v: &str) -> Self {
-        Self(v.as_bytes().to_vec())
-    }
-}
-
-impl From<Value> for Vec<u8> {
-    fn from(v: Value) -> Self {
-        v.0
+impl AsRef<[u8]> for Value {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
     }
 }
 
@@ -61,35 +91,74 @@ impl PartialEq<Value> for &str {
     }
 }
 
+impl Value {
+    pub fn into_vec(self) -> Vec<u8> {
+        self.0
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.clone()
+    }
+}
+
 #[async_trait]
 pub trait Backend {
-    type BatchOperation: BatchOperation;
-    type AtomicWriteOperation: AtomicWriteOperation;
+    type BatchOperation: BatchOperation + Send;
+    type AtomicWriteOperation: AtomicWriteOperation + Send;
 
-    async fn get<K: Arg>(&self, key: K) -> Result<Option<Value>>;
-    async fn set<K: Arg, V: Arg>(&self, key: K, value: V) -> Result<()>;
-    async fn set_eq<K: Arg, V: Arg, OV: Arg>(
+    async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>>;
+    async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
+        &self,
+        key: K,
+        value: V,
+    ) -> Result<()>;
+    async fn set_eq<
+        'a,
+        'b,
+        'c,
+        K: Into<Arg<'a>> + Send,
+        V: Into<Arg<'b>> + Send,
+        OV: Into<Arg<'c>> + Send,
+    >(
         &self,
         key: K,
         value: V,
         old_value: OV,
     ) -> Result<bool>;
-    async fn set_nx<K: Arg, V: Arg>(&self, key: K, value: V) -> Result<bool>;
-    async fn delete<K: Arg>(&self, key: K) -> Result<bool>;
+    async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
+        &self,
+        key: K,
+        value: V,
+    ) -> Result<bool>;
+    async fn delete<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<bool>;
 
-    async fn s_add<K: Arg, V: Arg>(&self, key: K, value: V) -> Result<()>;
-    async fn s_members<K: Arg>(&self, key: K) -> Result<Vec<Value>>;
+    async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
+        &self,
+        key: K,
+        value: V,
+    ) -> Result<()>;
+    async fn s_members<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Vec<Value>>;
 
-    async fn z_add<K: Arg, V: Arg>(&self, key: K, value: V, score: f64) -> Result<()>;
-    async fn z_count<K: Arg>(&self, key: K, min: f64, max: f64) -> Result<usize>;
-    async fn z_range_by_score<K: Arg>(
+    async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
+        &self,
+        key: K,
+        value: V,
+        score: f64,
+    ) -> Result<()>;
+    async fn z_count<'a, K: Into<Arg<'a>> + Send>(
+        &self,
+        key: K,
+        min: f64,
+        max: f64,
+    ) -> Result<usize>;
+    async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(
         &self,
         key: K,
         min: f64,
         max: f64,
         limit: usize,
     ) -> Result<Vec<Value>>;
-    async fn z_rev_range_by_score<K: Arg>(
+    async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(
         &self,
         key: K,
         min: f64,
@@ -120,7 +189,7 @@ impl GetResult {
 }
 
 pub trait BatchOperation {
-    fn get<K: Arg + 'static>(&mut self, key: K) -> GetResult;
+    fn get<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K) -> GetResult;
 }
 
 pub struct ConditionalResult {
@@ -139,14 +208,23 @@ impl ConditionalResult {
 }
 
 pub trait AtomicWriteOperation {
-    fn set<K: Arg, V: Arg>(&mut self, key: K, value: V);
-    fn set_nx<K: Arg, V: Arg>(&mut self, key: K, value: V) -> ConditionalResult;
-    fn z_add<K: Arg, V: Arg>(&mut self, key: K, value: V, score: f64);
-    fn z_rem<K: Arg, V: Arg>(&mut self, key: K, value: V);
-    fn delete<K: Arg>(&mut self, key: K);
-    fn delete_xx<K: Arg>(&mut self, key: K) -> ConditionalResult;
-    fn s_add<K: Arg, V: Arg>(&mut self, key: K, value: V);
-    fn s_rem<K: Arg, V: Arg>(&mut self, key: K, value: V);
+    fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&mut self, key: K, value: V);
+    fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
+        &mut self,
+        key: K,
+        value: V,
+    ) -> ConditionalResult;
+    fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(
+        &mut self,
+        key: K,
+        value: V,
+        score: f64,
+    );
+    fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&mut self, key: K, value: V);
+    fn delete<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K);
+    fn delete_xx<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K) -> ConditionalResult;
+    fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&mut self, key: K, value: V);
+    fn s_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&mut self, key: K, value: V);
 }
 
 // FallbackBatchOperation provides a suitable fallback for stores that don't supported optimized
@@ -159,7 +237,7 @@ impl FallbackBatchOperation {
     pub async fn exec<B: Backend>(self, backend: &B) -> Result<()> {
         for (k, tx) in self.gets.into_iter() {
             let v = backend.get(k).await?;
-            tx.try_send(v)?;
+            tx.try_send(v).map_err(|e| -> Error { Box::new(e) })?;
         }
         Ok(())
     }
@@ -172,9 +250,9 @@ impl FallbackBatchOperation {
 }
 
 impl BatchOperation for FallbackBatchOperation {
-    fn get<K: Arg + 'static>(&mut self, key: K) -> GetResult {
+    fn get<'a, K: Into<Arg<'a>> + Send>(&mut self, key: K) -> GetResult {
         let (ret, tx) = GetResult::new();
-        self.gets.push((key.into_arg(), tx));
+        self.gets.push((key.into().into_vec(), tx));
         ret
     }
 }
