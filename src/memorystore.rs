@@ -226,7 +226,7 @@ impl super::Backend for Backend {
                     _ => Unbounded,
                 },
             ))
-            .take(if limit > 0 { 0 } else { s.m.len() })
+            .take(if limit > 0 { limit } else { s.m.len() })
             .map(|(_, v)| v.clone().into())
             .collect())
     }
@@ -249,7 +249,7 @@ impl super::Backend for Backend {
                 },
             ))
             .rev()
-            .take(if limit > 0 { 0 } else { s.m.len() })
+            .take(if limit > 0 { limit } else { s.m.len() })
             .map(|(_, v)| v.clone().into())
             .collect())
     }

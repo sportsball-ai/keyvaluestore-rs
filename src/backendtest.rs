@@ -83,6 +83,10 @@ macro_rules! test_backend {
             let members = b.z_range_by_score("foo", -0.5, 1.0, 0).await.unwrap();
             assert_eq!(vec!["-0.5", "0", "0.5", "0.5b", "1"], members);
 
+            // Limit
+            let members = b.z_range_by_score("foo", -0.5, 1.0, 2).await.unwrap();
+            assert_eq!(vec!["-0.5", "0"], members);
+
             // -Inf
             let members = b.z_range_by_score("foo", f64::NEG_INFINITY, 1.0, 0).await.unwrap();
             assert_eq!(vec!["-2", "-1", "-0.5", "0", "0.5", "0.5b", "1"], members);
@@ -96,6 +100,10 @@ macro_rules! test_backend {
                 // MinMax
                 let members = b.z_rev_range_by_score("foo", -0.5, 1.0, 0).await.unwrap();
                 assert_eq!(vec!["1", "0.5b", "0.5", "0", "-0.5"], members);
+
+                // Limit
+                let members = b.z_rev_range_by_score("foo", -0.5, 1.0, 2).await.unwrap();
+                assert_eq!(vec!["1", "0.5b"], members);
 
                 // -Inf
                 let members = b.z_rev_range_by_score("foo", f64::NEG_INFINITY, 1.0, 0).await.unwrap();
