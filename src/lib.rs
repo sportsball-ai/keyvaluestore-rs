@@ -71,7 +71,7 @@ impl<'a> Into<Arg<'a>> for &'a str {
 
 impl Into<Arg<'static>> for String {
     fn into(self) -> Arg<'static> {
-        Arg::Owned(self.as_bytes().to_vec())
+        Arg::Owned(self.into_bytes())
     }
 }
 
