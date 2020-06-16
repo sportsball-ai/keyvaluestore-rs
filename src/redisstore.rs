@@ -135,10 +135,29 @@ impl super::Backend for Backend {
                 BatchSubOperation::Get(key, _) => key,
             })
             .collect();
-        let values: Vec<Option<Value>> = box_try!(self.get_connection().await?.get(keys).await);
-        for op in op.ops.into_iter().zip(values) {
-            match op {
-                (BatchSubOperation::Get(_, tx), v) => box_try!(tx.try_send(v)),
+        match keys.len() {
+            0 => {}
+            1 => {
+                let v = box_try!(self.get_connection().await?.get(keys[0]).await);
+                match &op.ops[0] {
+                    BatchSubOperation::Get(_, tx) => match tx.try_send(v) {
+                        Ok(_) => {}
+                        Err(mpsc::TrySendError::Disconnected(_)) => {}
+                        Err(e) => return Err(Box::new(e)),
+                    },
+                }
+            }
+            _ => {
+                let values: Vec<Option<Value>> = box_try!(self.get_connection().await?.get(keys).await);
+                for op in op.ops.into_iter().zip(values) {
+                    match op {
+                        (BatchSubOperation::Get(_, tx), v) => match tx.try_send(v) {
+                            Ok(_) => {}
+                            Err(mpsc::TrySendError::Disconnected(_)) => {}
+                            Err(e) => return Err(Box::new(e)),
+                        },
+                    }
+                }
             }
         }
         Ok(())

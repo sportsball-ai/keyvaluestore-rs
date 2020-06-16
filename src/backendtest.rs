@@ -162,6 +162,12 @@ macro_rules! test_backend {
 
             let mut batch = BatchOperation::new();
             let get = batch.get("foo");
+            b.exec_batch(batch).await.unwrap();
+
+            assert_eq!(get.value(), Some("bar".into()));
+
+            let mut batch = BatchOperation::new();
+            let get = batch.get("foo");
             let get2 = batch.get("foo2");
             let get3 = batch.get("foo3");
             b.exec_batch(batch).await.unwrap();
