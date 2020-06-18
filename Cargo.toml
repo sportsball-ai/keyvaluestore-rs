@@ -9,6 +9,13 @@ async-trait = "0.1.32"
 simple-error = "0.2.1"
 tokio = { version = "0.2.21", features = ["macros", "rt-core"] }
 redis = "0.16.0"
+# we use a fork to work around https://github.com/rusoto/rusoto/issues/1774
+rusoto_core = { git = "https://github.com/sportsball-ai/rusoto", rev = "f6d480c19dd6b1607d03bdb174ba279da31af2ec" }
+rusoto_credential = { git = "https://github.com/sportsball-ai/rusoto", rev = "f6d480c19dd6b1607d03bdb174ba279da31af2ec" }
+rusoto_dynamodb = { git = "https://github.com/sportsball-ai/rusoto", rev = "f6d480c19dd6b1607d03bdb174ba279da31af2ec" }
+bytes = "0.5.4"
+rand = "0.7.3"
+base64 = "0.12.2"
 
 [dev-dependencies]
 serial_test = "0.4.0"

@@ -1,12 +1,10 @@
-use super::{
-    box_try, Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Error, Result, Value, MAX_ATOMIC_WRITE_SUB_OPERATIONS,
-};
+use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Result, Value, MAX_ATOMIC_WRITE_SUB_OPERATIONS};
 use redis::{aio::Connection, AsyncCommands, Client, FromRedisValue, RedisResult, RedisWrite, Script, ToRedisArgs};
 use simple_error::SimpleError;
 use std::sync::mpsc;
 
 pub struct Backend {
-    client: Client,
+    pub client: Client,
 }
 
 impl Backend {
@@ -15,7 +13,7 @@ impl Backend {
     }
 
     async fn get_connection(&self) -> Result<Connection> {
-        Ok(box_try!(self.client.get_async_connection().await))
+        Ok(self.client.get_async_connection().await?)
     }
 }
 
@@ -44,11 +42,11 @@ impl FromRedisValue for Value {
 #[async_trait]
 impl super::Backend for Backend {
     async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>> {
-        Ok(box_try!(self.get_connection().await?.get(key.into()).await))
+        Ok(self.get_connection().await?.get(key.into()).await?)
     }
 
     async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
-        Ok(box_try!(self.get_connection().await?.set(key.into(), value.into()).await))
+        Ok(self.get_connection().await?.set(key.into(), value.into()).await?)
     }
 
     async fn set_eq<'a, 'b, 'c, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(
@@ -62,68 +60,69 @@ impl super::Backend for Backend {
         let value = value.into();
         let old_value = old_value.into();
         loop {
-            box_try!(redis::cmd("WATCH").arg(&[&key]).query_async(&mut conn).await);
+            redis::cmd("WATCH").arg(&[&key]).query_async(&mut conn).await?;
             let mut pipe = redis::pipe();
             let pipe = pipe.atomic();
-            let before: Option<Value> = box_try!(conn.get(&key).await);
+            let before: Option<Value> = conn.get(&key).await?;
             if let Some(before) = before {
                 if before.as_bytes() == old_value.as_bytes() {
-                    match box_try!(pipe.set(&key, &value).ignore().query_async::<_, Option<()>>(&mut conn).await) {
+                    match pipe.set(&key, &value).ignore().query_async::<_, Option<()>>(&mut conn).await? {
                         None => continue,
                         Some(_) => return Ok(true),
                     }
                 }
             }
-            box_try!(redis::cmd("UNWATCH").query_async(&mut conn).await);
+            redis::cmd("UNWATCH").query_async(&mut conn).await?;
             return Ok(false);
         }
     }
 
     async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
-        Ok(box_try!(self.get_connection().await?.set_nx(key.into(), value.into()).await))
+        Ok(self.get_connection().await?.set_nx(key.into(), value.into()).await?)
     }
 
     async fn delete<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<bool> {
-        let deleted: i32 = box_try!(self.get_connection().await?.del(key.into()).await);
+        let deleted: i32 = self.get_connection().await?.del(key.into()).await?;
         Ok(deleted > 0)
     }
 
     async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
-        Ok(box_try!(self.get_connection().await?.sadd(key.into(), value.into()).await))
+        Ok(self.get_connection().await?.sadd(key.into(), value.into()).await?)
     }
 
     async fn s_members<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Vec<Value>> {
-        Ok(box_try!(self.get_connection().await?.smembers(key.into()).await))
+        Ok(self.get_connection().await?.smembers(key.into()).await?)
     }
 
     async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
-        Ok(box_try!(self.get_connection().await?.zadd(key.into(), value.into(), score).await))
+        Ok(self.get_connection().await?.zadd(key.into(), value.into(), score).await?)
     }
 
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
-        Ok(box_try!(self.get_connection().await?.zcount(key.into(), min, max).await))
+        Ok(self.get_connection().await?.zcount(key.into(), min, max).await?)
     }
 
     async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         if limit > 0 {
-            Ok(box_try!(
-                self.get_connection().await?.zrangebyscore_limit(key.into(), min, max, 0, limit as isize).await
-            ))
+            Ok(self
+                .get_connection()
+                .await?
+                .zrangebyscore_limit(key.into(), min, max, 0, limit as isize)
+                .await?)
         } else {
-            Ok(box_try!(self.get_connection().await?.zrangebyscore(key.into(), min, max).await))
+            Ok(self.get_connection().await?.zrangebyscore(key.into(), min, max).await?)
         }
     }
 
     async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         if limit > 0 {
-            Ok(box_try!(
-                self.get_connection()
-                    .await?
-                    .zrevrangebyscore_limit(key.into(), max, min, 0, limit as isize)
-                    .await
-            ))
+            Ok(self
+                .get_connection()
+                .await?
+                .zrevrangebyscore_limit(key.into(), max, min, 0, limit as isize)
+                .await?)
         } else {
-            Ok(box_try!(self.get_connection().await?.zrevrangebyscore(key.into(), max, min).await))
+            Ok(self.get_connection().await?.zrevrangebyscore(key.into(), max, min).await?)
         }
     }
 
@@ -138,24 +137,26 @@ impl super::Backend for Backend {
         match keys.len() {
             0 => {}
             1 => {
-                let v = box_try!(self.get_connection().await?.get(keys[0]).await);
-                match &op.ops[0] {
-                    BatchSubOperation::Get(_, tx) => match tx.try_send(v) {
-                        Ok(_) => {}
-                        Err(mpsc::TrySendError::Disconnected(_)) => {}
-                        Err(e) => return Err(Box::new(e)),
-                    },
-                }
-            }
-            _ => {
-                let values: Vec<Option<Value>> = box_try!(self.get_connection().await?.get(keys).await);
-                for op in op.ops.into_iter().zip(values) {
-                    match op {
-                        (BatchSubOperation::Get(_, tx), v) => match tx.try_send(v) {
+                if let Some(v) = self.get_connection().await?.get(keys[0]).await? {
+                    match &op.ops[0] {
+                        BatchSubOperation::Get(_, tx) => match tx.try_send(v) {
                             Ok(_) => {}
                             Err(mpsc::TrySendError::Disconnected(_)) => {}
                             Err(e) => return Err(Box::new(e)),
                         },
+                    }
+                }
+            }
+            _ => {
+                let values: Vec<Option<Value>> = self.get_connection().await?.get(keys).await?;
+                for op in op.ops.into_iter().zip(values) {
+                    match op {
+                        (BatchSubOperation::Get(_, tx), Some(v)) => match tx.try_send(v) {
+                            Ok(_) => {}
+                            Err(mpsc::TrySendError::Disconnected(_)) => {}
+                            Err(e) => return Err(Box::new(e)),
+                        },
+                        (_, None) => {}
                     }
                 }
             }
@@ -275,7 +276,7 @@ impl super::Backend for Backend {
             invocation.arg(arg);
         }
 
-        let results: Vec<Option<()>> = box_try!(invocation.invoke_async(&mut self.get_connection().await?).await);
+        let results: Vec<Option<()>> = invocation.invoke_async(&mut self.get_connection().await?).await?;
         if results.len() != failure_txs.len() {
             return Err(Box::new(SimpleError::new("not enough return values")));
         }
@@ -313,8 +314,8 @@ mod test {
         use crate::{redisstore, test_backend};
         use redis::{Client, ConnectionAddr, ConnectionInfo};
 
-        test_backend!(|| {
-            let addr = std::env::var("REDIS_ADDRESS").unwrap_or("127.0.0.1:6379".to_string());
+        test_backend!(|| async {
+            let addr = std::env::var("REDIS_ADDRESS").unwrap_or("127.0.0.1".to_string());
             let addr: Vec<_> = addr.split(':').collect();
             let client = Client::open(ConnectionInfo {
                 addr: Box::new(ConnectionAddr::Tcp(

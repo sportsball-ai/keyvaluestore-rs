@@ -6,7 +6,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_set() {
-            let b = $f();
+            let b = $f().await;
 
             b.set("foo", "bar").await.unwrap();
             assert_eq!(b.get("foo").await.unwrap(), Some("bar".into()));
@@ -15,7 +15,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_delete() {
-            let b = $f();
+            let b = $f().await;
 
             assert_eq!(b.delete("foo").await.unwrap(), false);
 
@@ -29,7 +29,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_set_nx() {
-            let b = $f();
+            let b = $f().await;
 
             assert_eq!(b.set_nx("foo", "bar").await.unwrap(), true);
             assert_eq!(b.get("foo").await.unwrap(), Some("bar".into()));
@@ -40,7 +40,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_set_eq() {
-            let b = $f();
+            let b = $f().await;
 
             b.set("foo", "bar").await.unwrap();
             assert_eq!(b.set_eq("foo", "baz", "bar").await.unwrap(), true);
@@ -53,7 +53,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_s_add() {
-            let b = $f();
+            let b = $f().await;
 
             b.s_add("foo", "bar").await.unwrap();
             assert_eq!(vec!["bar"], b.s_members("foo").await.unwrap());
@@ -68,7 +68,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_z_range_by_score() {
-            let b = $f();
+            let b = $f().await;
 
             b.z_add("foo", "-2", -2.0).await.unwrap();
             b.z_add("foo", "-1", -1.0).await.unwrap();
@@ -134,7 +134,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_z_count() {
-            let b = $f();
+            let b = $f().await;
 
             b.z_add("foo", "a", 0.0).await.unwrap();
             b.z_add("foo", "b", 1.0).await.unwrap();
@@ -163,7 +163,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_batch_get() {
-            let b = $f();
+            let b = $f().await;
 
             b.set("foo", "bar").await.unwrap();
             b.set("foo2", "bar2").await.unwrap();
@@ -188,21 +188,21 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_set() {
-            let b = $f();
+            let b = $f().await;
 
             let mut tx = AtomicWriteOperation::new();
             tx.set("foo", "bar");
-            tx.set("foo", "baz");
+            tx.set("bar", "baz");
             assert_eq!(b.exec_atomic_write(tx).await.unwrap(), true);
 
             let mut tx = AtomicWriteOperation::new();
             tx.set_nx("foo", "bar");
-            tx.set("foo", "baz");
+            tx.set("bar", "baz");
             assert_eq!(b.exec_atomic_write(tx).await.unwrap(), false);
 
             let mut tx = AtomicWriteOperation::new();
             let c = tx.set_nx("foo", "bar");
-            tx.set("foo", "baz");
+            tx.set("bar", "baz");
             assert_eq!(b.exec_atomic_write(tx).await.unwrap(), false);
             assert_eq!(c.failed(), true);
         }
@@ -210,7 +210,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_set_nx() {
-            let b = $f();
+            let b = $f().await;
 
             b.set("foo", "bar").await.unwrap();
 
@@ -233,7 +233,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_delete() {
-            let b = $f();
+            let b = $f().await;
 
             b.set("foo", "bar").await.unwrap();
             b.set("deleteme", "bar").await.unwrap();
@@ -258,7 +258,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_delete_xx() {
-            let b = $f();
+            let b = $f().await;
 
             b.set("foo", "bar").await.unwrap();
             b.set("deleteme", "bar").await.unwrap();
@@ -283,7 +283,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_z_add() {
-            let b = $f();
+            let b = $f().await;
 
             b.set("zsetcond", "foo").await.unwrap();
 
@@ -313,14 +313,13 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_s_add() {
-            let b = $f();
+            let b = $f().await;
 
             b.set("setcond", "foo").await.unwrap();
 
             let mut tx = AtomicWriteOperation::new();
             let c = tx.set_nx("setcond", "foo");
             tx.s_add("set", "foo");
-            tx.s_add("set", "bar");
             assert_eq!(b.exec_atomic_write(tx).await.unwrap(), false);
             assert_eq!(c.failed(), true);
 
@@ -329,12 +328,11 @@ macro_rules! test_backend {
 
             let mut tx = AtomicWriteOperation::new();
             tx.s_add("set", "foo");
-            tx.s_add("set", "bar");
             assert_eq!(b.exec_atomic_write(tx).await.unwrap(), true);
 
-            let mut members = b.s_members("set").await.unwrap();
-            members.sort();
-            assert_eq!(vec!["bar", "foo"], members);
+            assert_eq!(vec!["foo"], b.s_members("set").await.unwrap());
+
+            b.s_add("set", "bar").await.unwrap();
 
             let mut tx = AtomicWriteOperation::new();
             tx.s_rem("set", "foo");

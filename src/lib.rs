@@ -9,19 +9,19 @@ use std::convert::From;
 use std::sync::mpsc;
 
 pub mod backendtest;
+pub mod dynamodbstore;
 pub mod dynstore;
 pub mod memorystore;
 pub mod redisstore;
 
-type Error = Box<dyn std::error::Error + Send + 'static>;
-type Result<T> = std::result::Result<T, Error>;
+// re-export these crates since we use a fork
+// once this issue is resolved, we can delete the fork: https://github.com/rusoto/rusoto/issues/1774
+pub use rusoto_core;
+pub use rusoto_credential;
+pub use rusoto_dynamodb;
 
-#[macro_export]
-macro_rules! box_try {
-    ($e:expr) => {{
-        $e.map_err(|e| -> Error { Box::new(e) })?
-    }};
-}
+type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+type Result<T> = std::result::Result<T, Error>;
 
 pub enum Arg<'a> {
     Owned(Vec<u8>),
@@ -57,9 +57,21 @@ impl Into<Arg<'static>> for Vec<u8> {
     }
 }
 
+impl<'a> Into<Arg<'a>> for &'a Arg<'a> {
+    fn into(self) -> Arg<'a> {
+        Arg::Borrowed(self.as_bytes())
+    }
+}
+
 impl<'a> Into<Arg<'a>> for &'a Vec<u8> {
     fn into(self) -> Arg<'a> {
         Arg::Borrowed(&self)
+    }
+}
+
+impl<'a> Into<Arg<'a>> for &'a [u8] {
+    fn into(self) -> Arg<'a> {
+        Arg::Borrowed(self)
     }
 }
 
@@ -147,11 +159,12 @@ pub trait Backend {
         for op in op.ops {
             match op {
                 BatchSubOperation::Get(key, tx) => {
-                    let v = self.get(key).await?;
-                    match tx.try_send(v) {
-                        Ok(_) => {}
-                        Err(mpsc::TrySendError::Disconnected(_)) => {}
-                        Err(e) => return Err(Box::new(e)),
+                    if let Some(v) = self.get(key).await? {
+                        match tx.try_send(v) {
+                            Ok(_) => {}
+                            Err(mpsc::TrySendError::Disconnected(_)) => {}
+                            Err(e) => return Err(Box::new(e)),
+                        }
                     }
                 }
             }
@@ -163,22 +176,22 @@ pub trait Backend {
 }
 
 pub struct GetResult {
-    rx: mpsc::Receiver<Option<Value>>,
+    rx: mpsc::Receiver<Value>,
 }
 
 impl GetResult {
-    pub fn new() -> (Self, mpsc::SyncSender<Option<Value>>) {
+    pub fn new() -> (Self, mpsc::SyncSender<Value>) {
         let (tx, rx) = mpsc::sync_channel(1);
         (Self { rx }, tx)
     }
 
     pub fn value(self) -> Option<Value> {
-        self.rx.recv().unwrap_or(None)
+        self.rx.try_recv().ok()
     }
 }
 
 pub enum BatchSubOperation<'a> {
-    Get(Arg<'a>, mpsc::SyncSender<Option<Value>>),
+    Get(Arg<'a>, mpsc::SyncSender<Value>),
 }
 
 pub struct BatchOperation<'a> {
