@@ -572,7 +572,7 @@ mod test {
                 HttpClient::new().unwrap(),
                 StaticProvider::new_minimal("ACCESSKEYID".to_string(), "SECRET".to_string()),
                 Region::Custom {
-                    name: "us-east-1".to_string(),
+                    name: "test".to_string(),
                     endpoint,
                 },
             );
