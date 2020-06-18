@@ -1,8 +1,9 @@
-use super::{memorystore, redisstore, Arg, AtomicWriteOperation, BatchOperation, Result, Value};
+use super::{dynamodbstore, memorystore, redisstore, Arg, AtomicWriteOperation, BatchOperation, Result, Value};
 
 pub enum Backend {
     Memory(memorystore::Backend),
     Redis(redisstore::Backend),
+    DynamoDB(dynamodbstore::Backend),
 }
 
 #[async_trait]
@@ -11,6 +12,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.get(key).await,
             Self::Redis(backend) => backend.get(key).await,
+            Self::DynamoDB(backend) => backend.get(key).await,
         }
     }
 
@@ -18,6 +20,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.set(key, value).await,
             Self::Redis(backend) => backend.set(key, value).await,
+            Self::DynamoDB(backend) => backend.set(key, value).await,
         }
     }
 
@@ -30,6 +33,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.set_eq(key, value, old_value).await,
             Self::Redis(backend) => backend.set_eq(key, value, old_value).await,
+            Self::DynamoDB(backend) => backend.set_eq(key, value, old_value).await,
         }
     }
 
@@ -37,6 +41,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.set_nx(key, value).await,
             Self::Redis(backend) => backend.set_nx(key, value).await,
+            Self::DynamoDB(backend) => backend.set_nx(key, value).await,
         }
     }
 
@@ -44,6 +49,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.delete(key).await,
             Self::Redis(backend) => backend.delete(key).await,
+            Self::DynamoDB(backend) => backend.delete(key).await,
         }
     }
 
@@ -51,6 +57,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.s_add(key, value).await,
             Self::Redis(backend) => backend.s_add(key, value).await,
+            Self::DynamoDB(backend) => backend.s_add(key, value).await,
         }
     }
 
@@ -58,6 +65,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.s_members(key).await,
             Self::Redis(backend) => backend.s_members(key).await,
+            Self::DynamoDB(backend) => backend.s_members(key).await,
         }
     }
 
@@ -65,6 +73,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.z_add(key, value, score).await,
             Self::Redis(backend) => backend.z_add(key, value, score).await,
+            Self::DynamoDB(backend) => backend.z_add(key, value, score).await,
         }
     }
 
@@ -72,6 +81,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.z_count(key, min, max).await,
             Self::Redis(backend) => backend.z_count(key, min, max).await,
+            Self::DynamoDB(backend) => backend.z_count(key, min, max).await,
         }
     }
 
@@ -79,6 +89,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.z_range_by_score(key, min, max, limit).await,
             Self::Redis(backend) => backend.z_range_by_score(key, min, max, limit).await,
+            Self::DynamoDB(backend) => backend.z_range_by_score(key, min, max, limit).await,
         }
     }
 
@@ -86,6 +97,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.z_rev_range_by_score(key, min, max, limit).await,
             Self::Redis(backend) => backend.z_rev_range_by_score(key, min, max, limit).await,
+            Self::DynamoDB(backend) => backend.z_rev_range_by_score(key, min, max, limit).await,
         }
     }
 
@@ -93,6 +105,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.exec_batch(op).await,
             Self::Redis(backend) => backend.exec_batch(op).await,
+            Self::DynamoDB(backend) => backend.exec_batch(op).await,
         }
     }
 
@@ -100,6 +113,7 @@ impl super::Backend for Backend {
         match self {
             Self::Memory(backend) => backend.exec_atomic_write(op).await,
             Self::Redis(backend) => backend.exec_atomic_write(op).await,
+            Self::DynamoDB(backend) => backend.exec_atomic_write(op).await,
         }
     }
 }
@@ -108,6 +122,6 @@ impl super::Backend for Backend {
 mod test {
     mod backend {
         use crate::{dynstore, memorystore, test_backend};
-        test_backend!(|| dynstore::Backend::Memory(memorystore::Backend::new()));
+        test_backend!(|| async { dynstore::Backend::Memory(memorystore::Backend::new()) });
     }
 }

@@ -330,6 +330,6 @@ impl super::Backend for Backend {
 mod test {
     mod backend {
         use crate::{memorystore, test_backend};
-        test_backend!(|| memorystore::Backend::new());
+        test_backend!(|| async { memorystore::Backend::new() });
     }
 }

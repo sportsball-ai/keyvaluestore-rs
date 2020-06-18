@@ -3,11 +3,15 @@ services:
   dev:
     image: rust:1.43
     environment:
+      DYNAMODB_ENDPOINT: http://dynamodb.local:8000
       REDIS_ADDRESS: redis.local:6379
     links:
+      - dynamodb:dynamodb.local
       - redis:redis.local
     volumes:
       - .:/workspace
     working_dir: /workspace
   redis:
     image: redis
+  dynamodb:
+    image: amazon/dynamodb-local
