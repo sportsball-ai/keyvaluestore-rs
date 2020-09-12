@@ -356,6 +356,13 @@ impl super::Backend for Backend {
                 AtomicWriteSubOperation::SAdd(..) => None,
                 AtomicWriteSubOperation::SRem(..) => None,
                 AtomicWriteSubOperation::HSet(..) => None,
+                AtomicWriteSubOperation::HSetNX(key, field, _, tx) => match m.get(key.as_bytes()) {
+                    Some(MapEntry::Map(m)) => match m.contains_key(field.as_bytes()) {
+                        true => Some(tx),
+                        _ => None,
+                    },
+                    _ => None,
+                },
                 AtomicWriteSubOperation::HDel(..) => None,
             } {
                 match failure_tx.try_send(true) {
@@ -395,6 +402,9 @@ impl super::Backend for Backend {
                 }
                 AtomicWriteSubOperation::HSet(key, fields) => {
                     Self::h_set(&mut m, key, fields)?;
+                }
+                AtomicWriteSubOperation::HSetNX(key, field, value, _) => {
+                    Self::h_set(&mut m, key, vec![(field, value)])?;
                 }
                 AtomicWriteSubOperation::HDel(key, fields) => {
                     Self::h_del(&mut m, key, fields)?;

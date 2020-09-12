@@ -559,6 +559,20 @@ impl super::Backend for Backend {
                     item.update = Some(update);
                     (item, None)
                 }
+                AtomicWriteSubOperation::HSetNX(key, field, value, tx) => {
+                    let mut update = Update::default();
+                    update.table_name = self.table_name.clone();
+                    update.key = composite_key(key, NO_SORT_KEY);
+                    update.condition_expression = Some("attribute_not_exists(#f)".to_string());
+                    update.update_expression = "SET #f = :v".to_string();
+                    let mut v = AttributeValue::default();
+                    v.b = Some(value.into_vec().into());
+                    update.expression_attribute_values = Some(vec![(":v".to_string(), v)].into_iter().collect());
+                    update.expression_attribute_names = Some(vec![("#f".to_string(), encode_field_name(field.as_bytes()))].into_iter().collect());
+                    let mut item = TransactWriteItem::default();
+                    item.update = Some(update);
+                    (item, Some(tx))
+                }
                 AtomicWriteSubOperation::HDel(key, fields) => {
                     let names: HashMap<_, _> = fields
                         .into_iter()

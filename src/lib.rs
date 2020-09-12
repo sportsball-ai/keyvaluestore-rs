@@ -244,6 +244,7 @@ pub enum AtomicWriteSubOperation<'a> {
     SAdd(Arg<'a>, Arg<'a>),
     SRem(Arg<'a>, Arg<'a>),
     HSet(Arg<'a>, Vec<(Arg<'a>, Arg<'a>)>),
+    HSetNX(Arg<'a>, Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
     HDel(Arg<'a>, Vec<Arg<'a>>),
 }
 
@@ -305,6 +306,17 @@ impl<'a> AtomicWriteOperation<'a> {
             key.into(),
             fields.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
         ));
+    }
+
+    pub fn h_set_nx<'k: 'a, 'f: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send>(
+        &mut self,
+        key: K,
+        field: F,
+        value: V,
+    ) -> ConditionalResult {
+        let (ret, tx) = ConditionalResult::new();
+        self.ops.push(AtomicWriteSubOperation::HSetNX(key.into(), field.into(), value.into(), tx));
+        ret
     }
 
     pub fn h_del<'k: 'a, 'f: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, I: IntoIterator<Item = F> + Send>(&mut self, key: K, fields: I) {

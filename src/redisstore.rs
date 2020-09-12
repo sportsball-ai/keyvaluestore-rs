@@ -276,6 +276,13 @@ impl super::Backend for Backend {
                         failure_tx: None,
                     }
                 }
+                AtomicWriteSubOperation::HSetNX(key, field, value, tx) => SubOp {
+                    key,
+                    condition: "redis.call('hexists', $@, $0) == 0",
+                    write: "redis.call('hset', $@, $0, $1)".to_string(),
+                    args: vec![field, value],
+                    failure_tx: Some(tx),
+                },
                 AtomicWriteSubOperation::HDel(key, fields) => {
                     let args: Vec<_> = fields.into_iter().map(|f| f.into()).collect();
                     SubOp {
