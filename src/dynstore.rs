@@ -1,4 +1,5 @@
 use super::{dynamodbstore, memorystore, redisstore, Arg, AtomicWriteOperation, BatchOperation, Result, Value};
+use std::collections::HashMap;
 
 pub enum Backend {
     Memory(memorystore::Backend),
@@ -66,6 +67,42 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.s_members(key).await,
             Self::Redis(backend) => backend.s_members(key).await,
             Self::DynamoDB(backend) => backend.s_members(key).await,
+        }
+    }
+
+    async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+        &self,
+        key: K,
+        fields: I,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(backend) => backend.h_set(key, fields).await,
+            Self::Redis(backend) => backend.h_set(key, fields).await,
+            Self::DynamoDB(backend) => backend.h_set(key, fields).await,
+        }
+    }
+
+    async fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
+        match self {
+            Self::Memory(backend) => backend.h_del(key, fields).await,
+            Self::Redis(backend) => backend.h_del(key, fields).await,
+            Self::DynamoDB(backend) => backend.h_del(key, fields).await,
+        }
+    }
+
+    async fn h_get<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
+        match self {
+            Self::Memory(backend) => backend.h_get(key, field).await,
+            Self::Redis(backend) => backend.h_get(key, field).await,
+            Self::DynamoDB(backend) => backend.h_get(key, field).await,
+        }
+    }
+
+    async fn h_get_all<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
+        match self {
+            Self::Memory(backend) => backend.h_get_all(key).await,
+            Self::Redis(backend) => backend.h_get_all(key).await,
+            Self::DynamoDB(backend) => backend.h_get_all(key).await,
         }
     }
 

@@ -2,8 +2,7 @@ use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, Result, Value, M
 use simple_error::SimpleError;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 
 struct SortedSet {
     scores_by_member: HashMap<Vec<u8>, f64>,
@@ -14,6 +13,7 @@ enum MapEntry {
     Value(Vec<u8>),
     Set(HashSet<Vec<u8>>),
     SortedSet(SortedSet),
+    Map(HashMap<Vec<u8>, Vec<u8>>),
 }
 
 pub struct Backend {
@@ -59,6 +59,46 @@ impl Backend {
         match m.get_mut(key.as_bytes()) {
             Some(MapEntry::Set(s)) => {
                 s.remove(value.as_bytes());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+        m: &mut HashMap<Vec<u8>, MapEntry>,
+        key: K,
+        fields: I,
+    ) -> Result<()> {
+        let key = key.into();
+        match m.get_mut(key.as_bytes()) {
+            Some(MapEntry::Map(m)) => {
+                for field in fields.into_iter() {
+                    m.insert(field.0.into().into_vec(), field.1.into().into_vec());
+                }
+            }
+            _ => {
+                m.insert(
+                    key.into_vec(),
+                    MapEntry::Map(fields.into_iter().map(|(k, v)| (k.into().into_vec(), v.into().into_vec())).collect()),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(
+        m: &mut HashMap<Vec<u8>, MapEntry>,
+        key: K,
+        fields: I,
+    ) -> Result<()> {
+        let key = key.into();
+        match m.get_mut(key.as_bytes()) {
+            Some(MapEntry::Map(m)) => {
+                for field in fields.into_iter() {
+                    let field = field.into();
+                    m.remove(field.as_bytes());
+                }
             }
             _ => {}
         }
@@ -193,11 +233,43 @@ impl super::Backend for Backend {
     async fn s_members<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Vec<Value>> {
         let m = self.m.lock().unwrap();
         let key = key.into();
-        match m.get(key.as_bytes()) {
-            Some(MapEntry::Set(s)) => return Ok(s.iter().map(|v| v.clone().into()).collect()),
-            _ => {}
-        }
-        Ok(vec![])
+        Ok(match m.get(key.as_bytes()) {
+            Some(MapEntry::Set(s)) => s.iter().map(|v| v.clone().into()).collect(),
+            _ => vec![],
+        })
+    }
+
+    async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+        &self,
+        key: K,
+        fields: I,
+    ) -> Result<()> {
+        let mut m = self.m.lock().unwrap();
+        Self::h_set(&mut m, key, fields)
+    }
+
+    async fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
+        let mut m = self.m.lock().unwrap();
+        Self::h_del(&mut m, key, fields)
+    }
+
+    async fn h_get<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
+        let m = self.m.lock().unwrap();
+        let key = key.into();
+        let field = field.into();
+        Ok(match m.get(key.as_bytes()) {
+            Some(MapEntry::Map(m)) => m.get(field.as_bytes()).map(|v| v.clone().into()),
+            _ => None,
+        })
+    }
+
+    async fn h_get_all<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
+        let m = self.m.lock().unwrap();
+        let key = key.into();
+        Ok(match m.get(key.as_bytes()) {
+            Some(MapEntry::Map(m)) => m.iter().map(|(k, v)| (k.clone(), v.clone().into())).collect(),
+            _ => HashMap::new(),
+        })
     }
 
     async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
@@ -283,6 +355,8 @@ impl super::Backend for Backend {
                 }
                 AtomicWriteSubOperation::SAdd(..) => None,
                 AtomicWriteSubOperation::SRem(..) => None,
+                AtomicWriteSubOperation::HSet(..) => None,
+                AtomicWriteSubOperation::HDel(..) => None,
             } {
                 match failure_tx.try_send(true) {
                     Ok(_) => {}
@@ -318,6 +392,12 @@ impl super::Backend for Backend {
                 }
                 AtomicWriteSubOperation::ZRem(key, value) => {
                     Self::z_rem(&mut m, key, value)?;
+                }
+                AtomicWriteSubOperation::HSet(key, fields) => {
+                    Self::h_set(&mut m, key, fields)?;
+                }
+                AtomicWriteSubOperation::HDel(key, fields) => {
+                    Self::h_del(&mut m, key, fields)?;
                 }
             }
         }

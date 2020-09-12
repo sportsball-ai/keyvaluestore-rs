@@ -111,6 +111,18 @@ fn bounds(min: f64, max: f64) -> (Bound<'static>, Bound<'static>) {
     )
 }
 
+fn encode_field_name(name: &[u8]) -> String {
+    "~".to_string() + &base64::encode_config(name, base64::URL_SAFE_NO_PAD)
+}
+
+fn decode_field_name(name: &String) -> Option<Vec<u8>> {
+    if name.starts_with('~') {
+        base64::decode_config(&name[1..], base64::URL_SAFE_NO_PAD).ok()
+    } else {
+        None
+    }
+}
+
 impl Backend {
     async fn z_range_by_lex<'k, K: Into<Arg<'k>>>(
         &self,
@@ -235,6 +247,80 @@ impl super::Backend for Backend {
             .and_then(|v| v.bs)
             .map(|v| v.iter().map(|v| v.to_vec().into()).collect())
             .unwrap_or(vec![]))
+    }
+
+    async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+        &self,
+        key: K,
+        fields: I,
+    ) -> Result<()> {
+        let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let mut v = AttributeValue::default();
+                v.b = Some(f.1.into().into_vec().into());
+                ((format!("#n{}", i), encode_field_name(f.0.into().as_bytes())), (format!(":n{}", i), v))
+            })
+            .unzip();
+        let mut update = rusoto_dynamodb::UpdateItemInput::default();
+        update.key = composite_key(key, NO_SORT_KEY);
+        update.table_name = self.table_name.clone();
+        update.update_expression = Some(format!(
+            "SET {}",
+            (0..names.len()).map(|i| format!("#n{} = :n{}", i, i)).collect::<Vec<_>>().join(", ")
+        ));
+        update.expression_attribute_values = Some(values);
+        update.expression_attribute_names = Some(names);
+        self.client.update_item(update).await?;
+        Ok(())
+    }
+
+    async fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
+        let names: HashMap<_, _> = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| (format!("#n{}", i), encode_field_name(f.into().as_bytes())))
+            .collect();
+        let mut update = rusoto_dynamodb::UpdateItemInput::default();
+        update.key = composite_key(key, NO_SORT_KEY);
+        update.table_name = self.table_name.clone();
+        update.update_expression = Some(format!(
+            "REMOVE {}",
+            (0..names.len()).map(|i| format!("#n{}", i)).collect::<Vec<_>>().join(", ")
+        ));
+        update.expression_attribute_names = Some(names);
+        self.client.update_item(update).await?;
+        Ok(())
+    }
+
+    async fn h_get<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
+        let mut get = rusoto_dynamodb::GetItemInput::default();
+        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
+        get.key = composite_key(key, NO_SORT_KEY);
+        get.table_name = self.table_name.clone();
+        let result = self.client.get_item(get).await?;
+        Ok(result
+            .item
+            .and_then(|mut item| item.remove(&encode_field_name(field.into().as_bytes())))
+            .and_then(|v| v.b)
+            .map(|v| v.to_vec().into()))
+    }
+
+    async fn h_get_all<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
+        let mut get = rusoto_dynamodb::GetItemInput::default();
+        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
+        get.key = composite_key(key, NO_SORT_KEY);
+        get.table_name = self.table_name.clone();
+        let result = self.client.get_item(get).await?;
+        Ok(result
+            .item
+            .map(|item| {
+                item.into_iter()
+                    .filter_map(|(name, v)| decode_field_name(&name).and_then(|name| v.b.map(|v| (name, (*v).into()))))
+                    .collect()
+            })
+            .unwrap_or(HashMap::new()))
     }
 
     async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
@@ -451,6 +537,41 @@ impl super::Backend for Backend {
                     delete.key = composite_key(key, value);
                     let mut item = TransactWriteItem::default();
                     item.delete = Some(delete);
+                    (item, None)
+                }
+                AtomicWriteSubOperation::HSet(key, fields) => {
+                    let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, f)| {
+                            let mut v = AttributeValue::default();
+                            v.b = Some(f.1.into_vec().into());
+                            ((format!("#n{}", i), encode_field_name(f.0.as_bytes())), (format!(":n{}", i), v))
+                        })
+                        .unzip();
+                    let mut update = Update::default();
+                    update.table_name = self.table_name.clone();
+                    update.key = composite_key(key, NO_SORT_KEY);
+                    update.update_expression = format!("SET {}", (0..names.len()).map(|i| format!("#n{} = :n{}", i, i)).collect::<Vec<_>>().join(", "));
+                    update.expression_attribute_values = Some(values);
+                    update.expression_attribute_names = Some(names);
+                    let mut item = TransactWriteItem::default();
+                    item.update = Some(update);
+                    (item, None)
+                }
+                AtomicWriteSubOperation::HDel(key, fields) => {
+                    let names: HashMap<_, _> = fields
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, f)| (format!("#n{}", i), encode_field_name(f.as_bytes())))
+                        .collect();
+                    let mut update = Update::default();
+                    update.key = composite_key(key, NO_SORT_KEY);
+                    update.table_name = self.table_name.clone();
+                    update.update_expression = format!("REMOVE {}", (0..names.len()).map(|i| format!("#n{}", i)).collect::<Vec<_>>().join(", "));
+                    update.expression_attribute_names = Some(names);
+                    let mut item = TransactWriteItem::default();
+                    item.update = Some(update);
                     (item, None)
                 }
             })
