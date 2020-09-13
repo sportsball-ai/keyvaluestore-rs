@@ -5,8 +5,8 @@ extern crate async_trait;
 extern crate serial_test;
 extern crate simple_error;
 
-use std::convert::From;
 use std::sync::mpsc;
+use std::{collections::HashMap, convert::From};
 
 pub mod backendtest;
 pub mod dynamodbstore;
@@ -150,6 +150,15 @@ pub trait Backend {
     async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
     async fn s_members<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Vec<Value>>;
 
+    async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+        &self,
+        key: K,
+        fields: I,
+    ) -> Result<()>;
+    async fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()>;
+    async fn h_get<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>>;
+    async fn h_get_all<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>>;
+
     async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()>;
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize>;
     async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
@@ -234,6 +243,9 @@ pub enum AtomicWriteSubOperation<'a> {
     DeleteXX(Arg<'a>, mpsc::SyncSender<bool>),
     SAdd(Arg<'a>, Arg<'a>),
     SRem(Arg<'a>, Arg<'a>),
+    HSet(Arg<'a>, Vec<(Arg<'a>, Arg<'a>)>),
+    HSetNX(Arg<'a>, Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
+    HDel(Arg<'a>, Vec<Arg<'a>>),
 }
 
 // DynamoDB can't do more than 25 operations in an atomic write so all backends should enforce this
@@ -283,5 +295,32 @@ impl<'a> AtomicWriteOperation<'a> {
 
     pub fn s_rem<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
         self.ops.push(AtomicWriteSubOperation::SRem(key.into(), value.into()));
+    }
+
+    pub fn h_set<'k: 'a, 'f: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+        &mut self,
+        key: K,
+        fields: I,
+    ) {
+        self.ops.push(AtomicWriteSubOperation::HSet(
+            key.into(),
+            fields.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+        ));
+    }
+
+    pub fn h_set_nx<'k: 'a, 'f: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send>(
+        &mut self,
+        key: K,
+        field: F,
+        value: V,
+    ) -> ConditionalResult {
+        let (ret, tx) = ConditionalResult::new();
+        self.ops.push(AtomicWriteSubOperation::HSetNX(key.into(), field.into(), value.into(), tx));
+        ret
+    }
+
+    pub fn h_del<'k: 'a, 'f: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, I: IntoIterator<Item = F> + Send>(&mut self, key: K, fields: I) {
+        self.ops
+            .push(AtomicWriteSubOperation::HDel(key.into(), fields.into_iter().map(|k| k.into()).collect()));
     }
 }

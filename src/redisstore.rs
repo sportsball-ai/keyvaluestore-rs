@@ -1,7 +1,7 @@
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Result, Value, MAX_ATOMIC_WRITE_SUB_OPERATIONS};
 use redis::{aio::Connection, AsyncCommands, Client, FromRedisValue, RedisResult, RedisWrite, Script, ToRedisArgs};
 use simple_error::SimpleError;
-use std::sync::mpsc;
+use std::{collections::HashMap, sync::mpsc};
 
 pub struct Backend {
     pub client: Client,
@@ -94,6 +94,28 @@ impl super::Backend for Backend {
         Ok(self.get_connection().await?.smembers(key.into()).await?)
     }
 
+    async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+        &self,
+        key: K,
+        fields: I,
+    ) -> Result<()> {
+        let fields: Vec<_> = fields.into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+        Ok(self.get_connection().await?.hset_multiple(key.into(), &fields).await?)
+    }
+
+    async fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
+        let fields: Vec<_> = fields.into_iter().map(|f| f.into()).collect();
+        Ok(self.get_connection().await?.hdel(key.into(), fields).await?)
+    }
+
+    async fn h_get<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
+        Ok(self.get_connection().await?.hget(key.into(), field.into()).await?)
+    }
+
+    async fn h_get_all<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
+        Ok(self.get_connection().await?.hgetall(key.into()).await?)
+    }
+
     async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
         Ok(self.get_connection().await?.zadd(key.into(), value.into(), score).await?)
     }
@@ -172,7 +194,7 @@ impl super::Backend for Backend {
         struct SubOp<'a> {
             key: Arg<'a>,
             condition: &'static str,
-            write: &'static str,
+            write: String,
             args: Vec<Arg<'a>>,
             failure_tx: Option<mpsc::SyncSender<bool>>,
         }
@@ -184,59 +206,96 @@ impl super::Backend for Backend {
                 AtomicWriteSubOperation::Set(key, value) => SubOp {
                     key,
                     condition: "true",
-                    write: "redis.call('set', $@, $0)",
+                    write: "redis.call('set', $@, $0)".to_string(),
                     args: vec![value],
                     failure_tx: None,
                 },
                 AtomicWriteSubOperation::SetNX(key, value, tx) => SubOp {
                     key,
                     condition: "redis.call('exists', $@) == 0",
-                    write: "redis.call('set', $@, $0)",
+                    write: "redis.call('set', $@, $0)".to_string(),
                     args: vec![value],
                     failure_tx: Some(tx),
                 },
                 AtomicWriteSubOperation::Delete(key) => SubOp {
                     key,
                     condition: "true",
-                    write: "redis.call('del', $@)",
+                    write: "redis.call('del', $@)".to_string(),
                     args: vec![],
                     failure_tx: None,
                 },
                 AtomicWriteSubOperation::DeleteXX(key, tx) => SubOp {
                     key,
                     condition: "redis.call('exists', $@) == 1",
-                    write: "redis.call('del', $@)",
+                    write: "redis.call('del', $@)".to_string(),
                     args: vec![],
                     failure_tx: Some(tx),
                 },
                 AtomicWriteSubOperation::SAdd(key, value) => SubOp {
                     key,
                     condition: "true",
-                    write: "redis.call('sadd', $@, $0)",
+                    write: "redis.call('sadd', $@, $0)".to_string(),
                     args: vec![value],
                     failure_tx: None,
                 },
                 AtomicWriteSubOperation::SRem(key, value) => SubOp {
                     key,
                     condition: "true",
-                    write: "redis.call('srem', $@, $0)",
+                    write: "redis.call('srem', $@, $0)".to_string(),
                     args: vec![value],
                     failure_tx: None,
                 },
                 AtomicWriteSubOperation::ZAdd(key, value, score) => SubOp {
                     key,
                     condition: "true",
-                    write: "redis.call('zadd', $@, $1, $0)",
+                    write: "redis.call('zadd', $@, $1, $0)".to_string(),
                     args: vec![value, score.to_string().into()],
                     failure_tx: None,
                 },
                 AtomicWriteSubOperation::ZRem(key, value) => SubOp {
                     key,
                     condition: "true",
-                    write: "redis.call('zrem', $@, $0)",
+                    write: "redis.call('zrem', $@, $0)".to_string(),
                     args: vec![value],
                     failure_tx: None,
                 },
+                AtomicWriteSubOperation::HSet(key, fields) => {
+                    let mut args = Vec::new();
+                    for field in fields {
+                        args.push(field.0.into());
+                        args.push(field.1.into());
+                    }
+                    SubOp {
+                        key,
+                        condition: "true",
+                        write: format!(
+                            "redis.call('hset', $@, {})",
+                            (0..args.len()).map(|i| format!("${}", i)).collect::<Vec<_>>().join(", ")
+                        ),
+                        args,
+                        failure_tx: None,
+                    }
+                }
+                AtomicWriteSubOperation::HSetNX(key, field, value, tx) => SubOp {
+                    key,
+                    condition: "redis.call('hexists', $@, $0) == 0",
+                    write: "redis.call('hset', $@, $0, $1)".to_string(),
+                    args: vec![field, value],
+                    failure_tx: Some(tx),
+                },
+                AtomicWriteSubOperation::HDel(key, fields) => {
+                    let args: Vec<_> = fields.into_iter().map(|f| f.into()).collect();
+                    SubOp {
+                        key,
+                        condition: "true",
+                        write: format!(
+                            "redis.call('hdel', $@, {})",
+                            (0..args.len()).map(|i| format!("${}", i)).collect::<Vec<_>>().join(", ")
+                        ),
+                        args,
+                        failure_tx: None,
+                    }
+                }
             })
             .collect();
 
@@ -253,7 +312,7 @@ impl super::Backend for Backend {
                 i + 1,
                 preprocess_atomic_write_expression(op.condition, i + 1, args.len(), op.args.len())
             ));
-            write_expressions.push(preprocess_atomic_write_expression(op.write, i + 1, args.len(), op.args.len()));
+            write_expressions.push(preprocess_atomic_write_expression(&op.write, i + 1, args.len(), op.args.len()));
             keys.push(op.key);
             args.append(&mut op.args);
             failure_txs.push(op.failure_tx);

@@ -67,6 +67,51 @@ macro_rules! test_backend {
 
         #[tokio::test]
         #[serial]
+        async fn test_h_get() {
+            let b = $f().await;
+
+            let v = b.h_get("foo", "bar").await.unwrap();
+            assert_eq!(v, None);
+
+            b.h_set("foo", [("bar", "baz")].iter().cloned()).await.unwrap();
+
+            let v = b.h_get("foo", "bar").await.unwrap();
+            assert_eq!(Some("baz".into()), v);
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_h_del() {
+            let b = $f().await;
+
+            b.h_del("foo", ["bar"].iter().cloned()).await.unwrap();
+
+            b.h_set("foo", [("bar", "baz")].iter().cloned()).await.unwrap();
+
+            let v = b.h_get("foo", "bar").await.unwrap();
+            assert_eq!(Some("baz".into()), v);
+
+            b.h_del("foo", ["bar"].iter().cloned()).await.unwrap();
+
+            let v = b.h_get("foo", "bar").await.unwrap();
+            assert_eq!(v, None);
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_get_all() {
+            let b = $f().await;
+
+            b.h_set("foo", [("bar", "baz"), ("baz", "qux")].iter().cloned()).await.unwrap();
+
+            let m = b.h_get_all("foo").await.unwrap();
+            assert_eq!(m.len(), 2);
+            assert_eq!(Some(&"baz".into()), m.get("bar".as_bytes()));
+            assert_eq!(Some(&"qux".into()), m.get("baz".as_bytes()));
+        }
+
+        #[tokio::test]
+        #[serial]
         async fn test_z_range_by_score() {
             let b = $f().await;
 
@@ -340,6 +385,79 @@ macro_rules! test_backend {
 
             let members = b.s_members("set").await.unwrap();
             assert_eq!(vec!["bar"], members);
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_atomic_write_h_set() {
+            let b = $f().await;
+
+            b.set("setcond", "foo").await.unwrap();
+
+            let mut tx = AtomicWriteOperation::new();
+            let c = tx.set_nx("setcond", "foo");
+            tx.h_set("h", [("foo", "bar")].iter().cloned());
+            assert_eq!(b.exec_atomic_write(tx).await.unwrap(), false);
+            assert_eq!(c.failed(), true);
+
+            let v = b.h_get("h", "foo").await.unwrap();
+            assert_eq!(v, None);
+
+            let mut tx = AtomicWriteOperation::new();
+            tx.h_set("h", [("foo", "bar")].iter().cloned());
+            assert_eq!(b.exec_atomic_write(tx).await.unwrap(), true);
+
+            let v = b.h_get("h", "foo").await.unwrap();
+            assert_eq!(Some("bar".into()), v);
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_atomic_write_h_set_nx() {
+            let b = $f().await;
+
+            let mut tx = AtomicWriteOperation::new();
+            tx.set("foo", "bar");
+            let c = tx.h_set_nx("h", "foo", "bar");
+            assert_eq!(b.exec_atomic_write(tx).await.unwrap(), true);
+            assert_eq!(c.failed(), false);
+
+            let v = b.get("foo").await.unwrap();
+            assert_eq!(v, Some("bar".into()));
+
+            let mut tx = AtomicWriteOperation::new();
+            tx.set("foo", "baz");
+            let c = tx.h_set_nx("h", "foo", "bar");
+            assert_eq!(b.exec_atomic_write(tx).await.unwrap(), false);
+            assert_eq!(c.failed(), true);
+
+            let v = b.get("foo").await.unwrap();
+            assert_eq!(v, Some("bar".into()));
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_atomic_write_h_del() {
+            let b = $f().await;
+
+            b.set("setcond", "foo").await.unwrap();
+            b.h_set("h", [("foo", "bar")].iter().cloned()).await.unwrap();
+
+            let mut tx = AtomicWriteOperation::new();
+            let c = tx.set_nx("setcond", "foo");
+            tx.h_del("h", ["foo"].iter().cloned());
+            assert_eq!(b.exec_atomic_write(tx).await.unwrap(), false);
+            assert_eq!(c.failed(), true);
+
+            let v = b.h_get("h", "foo").await.unwrap();
+            assert_eq!(Some("bar".into()), v);
+
+            let mut tx = AtomicWriteOperation::new();
+            tx.h_del("h", ["foo"].iter().cloned());
+            assert_eq!(b.exec_atomic_write(tx).await.unwrap(), true);
+
+            let v = b.h_get("h", "foo").await.unwrap();
+            assert_eq!(v, None);
         }
     };
 }
