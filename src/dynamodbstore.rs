@@ -324,15 +324,27 @@ impl super::Backend for Backend {
     }
 
     async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
+        let v = value.into();
+        self.zh_add(key, &v, &v, score).await
+    }
+
+    async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        field: F,
+        value: V,
+        score: f64,
+    ) -> Result<()> {
+        let field = field.into();
         let value = value.into();
         let mut put = rusoto_dynamodb::PutItemInput::default();
         put.table_name = self.table_name.clone();
         put.item = new_item(
             key,
-            &value,
+            &field,
             vec![
                 ("v", attribute_value(&value)),
-                ("rk2", attribute_value(&[&float_sort_key(score), value.as_bytes()].concat())),
+                ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
             ],
         );
         self.client.put_item(put).await?;
@@ -371,6 +383,10 @@ impl super::Backend for Backend {
         Ok(count)
     }
 
+    async fn zh_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+        self.z_count(key, min, max).await
+    }
+
     async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         if min > max {
             return Ok(vec![]);
@@ -379,12 +395,20 @@ impl super::Backend for Backend {
         self.z_range_by_lex(key, min, max, limit, false, true).await
     }
 
+    async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        self.z_range_by_score(key, min, max, limit).await
+    }
+
     async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         if min > max {
             return Ok(vec![]);
         }
         let (min, max) = bounds(min, max);
         self.z_range_by_lex(key, min, max, limit, true, true).await
+    }
+
+    async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        self.z_rev_range_by_score(key, min, max, limit).await
     }
 
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
@@ -525,6 +549,21 @@ impl super::Backend for Backend {
                         vec![
                             ("v", attribute_value(&value)),
                             ("rk2", attribute_value(&[&float_sort_key(score), value.as_bytes()].concat())),
+                        ],
+                    );
+                    let mut item = TransactWriteItem::default();
+                    item.put = Some(put);
+                    (item, None)
+                }
+                AtomicWriteSubOperation::ZHAdd(key, field, value, score) => {
+                    let mut put = Put::default();
+                    put.table_name = self.table_name.clone();
+                    put.item = new_item(
+                        key,
+                        &field,
+                        vec![
+                            ("v", attribute_value(&value)),
+                            ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
                         ],
                     );
                     let mut item = TransactWriteItem::default();

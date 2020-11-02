@@ -39,6 +39,44 @@ impl FromRedisValue for Value {
     }
 }
 
+const ZH_HASH_KEY_PREFIX: &str = "__kvs_zh:";
+
+impl Backend {
+    async fn zh_range_by_score_impl<'a, K: Into<Arg<'a>> + Send>(
+        mut conn: Connection,
+        cmd: &'static str,
+        key: K,
+        start: f64,
+        end: f64,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let key = key.into();
+
+        let script = vec![
+            "local f = redis.call('",
+            cmd,
+            "', KEYS[1], unpack(ARGV))\n",
+            "if #f == 0 then return {} end\n",
+            "for i,v in pairs(redis.call('hmget', KEYS[2], unpack(f))) do if v then f[i] = v end end\n",
+            "return f",
+        ];
+        let script = Script::new(script.join("").as_str());
+
+        let mut invocation = script.prepare_invoke();
+        invocation.key(&key);
+        invocation.key([ZH_HASH_KEY_PREFIX.as_bytes(), key.as_bytes()].concat());
+        invocation.arg(start);
+        invocation.arg(end);
+        if limit != 0 {
+            invocation.arg("LIMIT");
+            invocation.arg(0);
+            invocation.arg(limit);
+        }
+
+        Ok(invocation.invoke_async(&mut conn).await?)
+    }
+}
+
 #[async_trait]
 impl super::Backend for Backend {
     async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>> {
@@ -120,8 +158,33 @@ impl super::Backend for Backend {
         Ok(self.get_connection().await?.zadd(key.into(), value.into(), score).await?)
     }
 
+    async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        field: F,
+        value: V,
+        score: f64,
+    ) -> Result<()> {
+        let key = key.into();
+        let field = field.into();
+        let value = value.into();
+        let mut conn = self.get_connection().await?;
+        redis::pipe()
+            .atomic()
+            .zadd(&key, &field, score)
+            .hset([ZH_HASH_KEY_PREFIX.as_bytes(), key.as_bytes()].concat(), &field, &value)
+            .ignore()
+            .query_async::<_, Option<()>>(&mut conn)
+            .await?;
+        Ok(())
+    }
+
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         Ok(self.get_connection().await?.zcount(key.into(), min, max).await?)
+    }
+
+    async fn zh_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+        self.z_count(key, min, max).await
     }
 
     async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
@@ -136,6 +199,10 @@ impl super::Backend for Backend {
         }
     }
 
+    async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        Self::zh_range_by_score_impl(self.get_connection().await?, "zrangebyscore", key, min, max, limit).await
+    }
+
     async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         if limit > 0 {
             Ok(self
@@ -146,6 +213,10 @@ impl super::Backend for Backend {
         } else {
             Ok(self.get_connection().await?.zrevrangebyscore(key.into(), max, min).await?)
         }
+    }
+
+    async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        Self::zh_range_by_score_impl(self.get_connection().await?, "zrevrangebyscore", key, max, min, limit).await
     }
 
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
@@ -192,7 +263,7 @@ impl super::Backend for Backend {
         }
 
         struct SubOp<'a> {
-            key: Arg<'a>,
+            keys: Vec<Arg<'a>>,
             condition: &'static str,
             write: String,
             args: Vec<Arg<'a>>,
@@ -204,58 +275,65 @@ impl super::Backend for Backend {
             .into_iter()
             .map(|op| match op {
                 AtomicWriteSubOperation::Set(key, value) => SubOp {
-                    key,
+                    keys: vec![key],
                     condition: "true",
-                    write: "redis.call('set', $@, $0)".to_string(),
+                    write: "redis.call('set', @0, $0)".to_string(),
                     args: vec![value],
                     failure_tx: None,
                 },
                 AtomicWriteSubOperation::SetNX(key, value, tx) => SubOp {
-                    key,
-                    condition: "redis.call('exists', $@) == 0",
-                    write: "redis.call('set', $@, $0)".to_string(),
+                    keys: vec![key],
+                    condition: "redis.call('exists', @0) == 0",
+                    write: "redis.call('set', @0, $0)".to_string(),
                     args: vec![value],
                     failure_tx: Some(tx),
                 },
                 AtomicWriteSubOperation::Delete(key) => SubOp {
-                    key,
+                    keys: vec![key],
                     condition: "true",
-                    write: "redis.call('del', $@)".to_string(),
+                    write: "redis.call('del', @0)".to_string(),
                     args: vec![],
                     failure_tx: None,
                 },
                 AtomicWriteSubOperation::DeleteXX(key, tx) => SubOp {
-                    key,
-                    condition: "redis.call('exists', $@) == 1",
-                    write: "redis.call('del', $@)".to_string(),
+                    keys: vec![key],
+                    condition: "redis.call('exists', @0) == 1",
+                    write: "redis.call('del', @0)".to_string(),
                     args: vec![],
                     failure_tx: Some(tx),
                 },
                 AtomicWriteSubOperation::SAdd(key, value) => SubOp {
-                    key,
+                    keys: vec![key],
                     condition: "true",
-                    write: "redis.call('sadd', $@, $0)".to_string(),
+                    write: "redis.call('sadd', @0, $0)".to_string(),
                     args: vec![value],
                     failure_tx: None,
                 },
                 AtomicWriteSubOperation::SRem(key, value) => SubOp {
-                    key,
+                    keys: vec![key],
                     condition: "true",
-                    write: "redis.call('srem', $@, $0)".to_string(),
+                    write: "redis.call('srem', @0, $0)".to_string(),
                     args: vec![value],
                     failure_tx: None,
                 },
                 AtomicWriteSubOperation::ZAdd(key, value, score) => SubOp {
-                    key,
+                    keys: vec![key],
                     condition: "true",
-                    write: "redis.call('zadd', $@, $1, $0)".to_string(),
+                    write: "redis.call('zadd', @0, $1, $0)".to_string(),
                     args: vec![value, score.to_string().into()],
                     failure_tx: None,
                 },
-                AtomicWriteSubOperation::ZRem(key, value) => SubOp {
-                    key,
+                AtomicWriteSubOperation::ZHAdd(key, field, value, score) => SubOp {
+                    keys: vec![[ZH_HASH_KEY_PREFIX.as_bytes(), key.as_bytes()].concat().into(), key],
                     condition: "true",
-                    write: "redis.call('zrem', $@, $0)".to_string(),
+                    write: "redis.call('zadd', @1, $1, $0)\nredis.call('hset', @0, $0, $2)".to_string(),
+                    args: vec![field, score.to_string().into(), value],
+                    failure_tx: None,
+                },
+                AtomicWriteSubOperation::ZRem(key, value) => SubOp {
+                    keys: vec![key],
+                    condition: "true",
+                    write: "redis.call('zrem', @0, $0)".to_string(),
                     args: vec![value],
                     failure_tx: None,
                 },
@@ -266,10 +344,10 @@ impl super::Backend for Backend {
                         args.push(field.1.into());
                     }
                     SubOp {
-                        key,
+                        keys: vec![key],
                         condition: "true",
                         write: format!(
-                            "redis.call('hset', $@, {})",
+                            "redis.call('hset', @0, {})",
                             (0..args.len()).map(|i| format!("${}", i)).collect::<Vec<_>>().join(", ")
                         ),
                         args,
@@ -277,19 +355,19 @@ impl super::Backend for Backend {
                     }
                 }
                 AtomicWriteSubOperation::HSetNX(key, field, value, tx) => SubOp {
-                    key,
-                    condition: "redis.call('hexists', $@, $0) == 0",
-                    write: "redis.call('hset', $@, $0, $1)".to_string(),
+                    keys: vec![key],
+                    condition: "redis.call('hexists', @0, $0) == 0",
+                    write: "redis.call('hset', @0, $0, $1)".to_string(),
                     args: vec![field, value],
                     failure_tx: Some(tx),
                 },
                 AtomicWriteSubOperation::HDel(key, fields) => {
                     let args: Vec<_> = fields.into_iter().map(|f| f.into()).collect();
                     SubOp {
-                        key,
+                        keys: vec![key],
                         condition: "true",
                         write: format!(
-                            "redis.call('hdel', $@, {})",
+                            "redis.call('hdel', @0, {})",
                             (0..args.len()).map(|i| format!("${}", i)).collect::<Vec<_>>().join(", ")
                         ),
                         args,
@@ -310,10 +388,16 @@ impl super::Backend for Backend {
             script.push(format!(
                 "checks[{}] = {}",
                 i + 1,
-                preprocess_atomic_write_expression(op.condition, i + 1, args.len(), op.args.len())
+                preprocess_atomic_write_expression(op.condition, keys.len(), op.keys.len(), args.len(), op.args.len())
             ));
-            write_expressions.push(preprocess_atomic_write_expression(&op.write, i + 1, args.len(), op.args.len()));
-            keys.push(op.key);
+            write_expressions.push(preprocess_atomic_write_expression(
+                &op.write,
+                keys.len(),
+                op.keys.len(),
+                args.len(),
+                op.args.len(),
+            ));
+            keys.append(&mut op.keys);
             args.append(&mut op.args);
             failure_txs.push(op.failure_tx);
         }
@@ -359,8 +443,11 @@ impl super::Backend for Backend {
     }
 }
 
-fn preprocess_atomic_write_expression(expr: &str, key_index: usize, args_offset: usize, num_args: usize) -> String {
-    let mut expr = expr.replace("$@", &format!("KEYS[{}]", key_index));
+fn preprocess_atomic_write_expression(expr: &str, keys_offset: usize, num_keys: usize, args_offset: usize, num_args: usize) -> String {
+    let mut expr = expr.to_string();
+    for i in (0..num_keys).rev() {
+        expr = expr.replace(&format!("@{}", i), &format!("KEYS[{}]", keys_offset + i + 1));
+    }
     for i in (0..num_args).rev() {
         expr = expr.replace(&format!("${}", i), &format!("ARGV[{}]", args_offset + i + 1));
     }
