@@ -164,6 +164,17 @@ pub trait Backend {
     async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
     async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
 
+    async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        field: F,
+        value: V,
+        score: f64,
+    ) -> Result<()>;
+    async fn zh_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize>;
+    async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
+    async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
+
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
         for op in op.ops {
             match op {
@@ -238,7 +249,9 @@ pub enum AtomicWriteSubOperation<'a> {
     Set(Arg<'a>, Arg<'a>),
     SetNX(Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
     ZAdd(Arg<'a>, Arg<'a>, f64),
+    ZHAdd(Arg<'a>, Arg<'a>, Arg<'a>, f64),
     ZRem(Arg<'a>, Arg<'a>),
+    ZHRem(Arg<'a>, Arg<'a>),
     Delete(Arg<'a>),
     DeleteXX(Arg<'a>, mpsc::SyncSender<bool>),
     SAdd(Arg<'a>, Arg<'a>),
@@ -275,8 +288,22 @@ impl<'a> AtomicWriteOperation<'a> {
         self.ops.push(AtomicWriteSubOperation::ZAdd(key.into(), value.into(), score));
     }
 
+    pub fn zh_add<'k: 'a, 'f: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send>(
+        &mut self,
+        key: K,
+        field: F,
+        value: V,
+        score: f64,
+    ) {
+        self.ops.push(AtomicWriteSubOperation::ZHAdd(key.into(), field.into(), value.into(), score));
+    }
+
     pub fn z_rem<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
         self.ops.push(AtomicWriteSubOperation::ZRem(key.into(), value.into()));
+    }
+
+    pub fn zh_rem<'k: 'a, 'f: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send>(&mut self, key: K, field: F) {
+        self.ops.push(AtomicWriteSubOperation::ZHRem(key.into(), field.into()));
     }
 
     pub fn delete<'k: 'a, K: Into<Arg<'k>> + Send>(&mut self, key: K) {

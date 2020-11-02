@@ -138,6 +138,44 @@ impl super::Backend for Backend {
         }
     }
 
+    async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        field: F,
+        value: V,
+        score: f64,
+    ) -> Result<()> {
+        match self {
+            Self::Memory(backend) => backend.zh_add(key, field, value, score).await,
+            Self::Redis(backend) => backend.zh_add(key, field, value, score).await,
+            Self::DynamoDB(backend) => backend.zh_add(key, field, value, score).await,
+        }
+    }
+
+    async fn zh_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+        match self {
+            Self::Memory(backend) => backend.zh_count(key, min, max).await,
+            Self::Redis(backend) => backend.zh_count(key, min, max).await,
+            Self::DynamoDB(backend) => backend.zh_count(key, min, max).await,
+        }
+    }
+
+    async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        match self {
+            Self::Memory(backend) => backend.zh_range_by_score(key, min, max, limit).await,
+            Self::Redis(backend) => backend.zh_range_by_score(key, min, max, limit).await,
+            Self::DynamoDB(backend) => backend.zh_range_by_score(key, min, max, limit).await,
+        }
+    }
+
+    async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        match self {
+            Self::Memory(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
+            Self::Redis(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
+            Self::DynamoDB(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
+        }
+    }
+
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
         match self {
             Self::Memory(backend) => backend.exec_batch(op).await,

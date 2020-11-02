@@ -105,26 +105,33 @@ impl Backend {
         Ok(())
     }
 
-    fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, value: V, score: f64) -> Result<()> {
+    fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
+        m: &mut HashMap<Vec<u8>, MapEntry>,
+        key: K,
+        field: F,
+        value: V,
+        score: f64,
+    ) -> Result<()> {
         let key = key.into();
+        let field = field.into();
         let value = value.into();
         match m.get_mut(key.as_bytes()) {
             Some(MapEntry::SortedSet(s)) => {
-                if let Some(&previous_score) = s.scores_by_member.get(value.as_bytes()) {
-                    s.scores_by_member.remove(value.as_bytes());
-                    s.m.remove(&[&float_sort_key(previous_score), value.as_bytes()].concat());
+                if let Some(&previous_score) = s.scores_by_member.get(field.as_bytes()) {
+                    s.scores_by_member.remove(field.as_bytes());
+                    s.m.remove(&[&float_sort_key(previous_score), field.as_bytes()].concat());
                 }
 
-                s.scores_by_member.insert(value.to_vec(), score);
-                s.m.insert([&float_sort_key(score), value.as_bytes()].concat(), value.into_vec());
+                s.scores_by_member.insert(field.to_vec(), score);
+                s.m.insert([&float_sort_key(score), field.as_bytes()].concat(), value.into_vec());
             }
             None => {
                 let mut s = SortedSet {
                     scores_by_member: HashMap::new(),
                     m: BTreeMap::new(),
                 };
-                s.scores_by_member.insert(value.to_vec(), score);
-                s.m.insert([&float_sort_key(score), value.as_bytes()].concat(), value.into_vec());
+                s.scores_by_member.insert(field.to_vec(), score);
+                s.m.insert([&float_sort_key(score), field.as_bytes()].concat(), value.into_vec());
                 m.insert(key.into_vec(), MapEntry::SortedSet(s));
             }
             _ => return Err(Box::new(SimpleError::new("attempt to add sorted set member to existing non-sorted-set value"))),
@@ -132,14 +139,14 @@ impl Backend {
         Ok(())
     }
 
-    fn z_rem<'a, K: Into<Arg<'a>> + Send, V: Into<Arg<'a>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, value: V) -> Result<()> {
+    fn zh_rem<'a, K: Into<Arg<'a>> + Send, F: Into<Arg<'a>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, field: F) -> Result<()> {
         let key = key.into();
-        let value = value.into();
+        let field = field.into();
         match m.get_mut(key.as_bytes()) {
             Some(MapEntry::SortedSet(s)) => {
-                if let Some(&previous_score) = s.scores_by_member.get(value.as_bytes()) {
-                    s.scores_by_member.remove(value.as_bytes());
-                    s.m.remove(&[&float_sort_key(previous_score), value.as_bytes()].concat());
+                if let Some(&previous_score) = s.scores_by_member.get(field.as_bytes()) {
+                    s.scores_by_member.remove(field.as_bytes());
+                    s.m.remove(&[&float_sort_key(previous_score), field.as_bytes()].concat());
                 }
             }
             _ => {}
@@ -274,11 +281,27 @@ impl super::Backend for Backend {
 
     async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
         let mut m = self.m.lock().unwrap();
-        Self::z_add(&mut m, key, value, score)
+        let v = value.into();
+        Self::zh_add(&mut m, key, &v, &v, score)
+    }
+
+    async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        field: F,
+        value: V,
+        score: f64,
+    ) -> Result<()> {
+        let mut m = self.m.lock().unwrap();
+        Self::zh_add(&mut m, key, field, value, score)
     }
 
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         Ok(self.z_range_by_score(key, min, max, 0).await?.len())
+    }
+
+    async fn zh_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+        self.z_count(key, min, max).await
     }
 
     async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
@@ -301,6 +324,10 @@ impl super::Backend for Backend {
             .take(if limit > 0 { limit } else { s.m.len() })
             .map(|(_, v)| v.clone().into())
             .collect())
+    }
+
+    async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        self.z_range_by_score(key, min, max, limit).await
     }
 
     async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
@@ -326,6 +353,10 @@ impl super::Backend for Backend {
             .collect())
     }
 
+    async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        self.z_rev_range_by_score(key, min, max, limit).await
+    }
+
     async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {
         if op.ops.len() > MAX_ATOMIC_WRITE_SUB_OPERATIONS {
             return Err(Box::new(SimpleError::new("max sub-operation count exceeded")));
@@ -344,7 +375,9 @@ impl super::Backend for Backend {
                     }
                 }
                 AtomicWriteSubOperation::ZAdd(..) => None,
+                AtomicWriteSubOperation::ZHAdd(..) => None,
                 AtomicWriteSubOperation::ZRem(..) => None,
+                AtomicWriteSubOperation::ZHRem(..) => None,
                 AtomicWriteSubOperation::Delete(..) => None,
                 AtomicWriteSubOperation::DeleteXX(key, tx) => {
                     if !m.contains_key(key.as_bytes()) {
@@ -395,10 +428,17 @@ impl super::Backend for Backend {
                     Self::s_rem(&mut m, key, value)?;
                 }
                 AtomicWriteSubOperation::ZAdd(key, value, score) => {
-                    Self::z_add(&mut m, key, value, score)?;
+                    let v: Arg = value.into();
+                    Self::zh_add(&mut m, key, &v, &v, score)?;
+                }
+                AtomicWriteSubOperation::ZHAdd(key, field, value, score) => {
+                    Self::zh_add(&mut m, key, field, value, score)?;
                 }
                 AtomicWriteSubOperation::ZRem(key, value) => {
-                    Self::z_rem(&mut m, key, value)?;
+                    Self::zh_rem(&mut m, key, value)?;
+                }
+                AtomicWriteSubOperation::ZHRem(key, field) => {
+                    Self::zh_rem(&mut m, key, field)?;
                 }
                 AtomicWriteSubOperation::HSet(key, fields) => {
                     Self::h_set(&mut m, key, fields)?;
