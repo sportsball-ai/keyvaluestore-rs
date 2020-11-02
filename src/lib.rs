@@ -251,6 +251,7 @@ pub enum AtomicWriteSubOperation<'a> {
     ZAdd(Arg<'a>, Arg<'a>, f64),
     ZHAdd(Arg<'a>, Arg<'a>, Arg<'a>, f64),
     ZRem(Arg<'a>, Arg<'a>),
+    ZHRem(Arg<'a>, Arg<'a>),
     Delete(Arg<'a>),
     DeleteXX(Arg<'a>, mpsc::SyncSender<bool>),
     SAdd(Arg<'a>, Arg<'a>),
@@ -299,6 +300,10 @@ impl<'a> AtomicWriteOperation<'a> {
 
     pub fn z_rem<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
         self.ops.push(AtomicWriteSubOperation::ZRem(key.into(), value.into()));
+    }
+
+    pub fn zh_rem<'k: 'a, 'f: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send>(&mut self, key: K, field: F) {
+        self.ops.push(AtomicWriteSubOperation::ZHRem(key.into(), field.into()));
     }
 
     pub fn delete<'k: 'a, K: Into<Arg<'k>> + Send>(&mut self, key: K) {

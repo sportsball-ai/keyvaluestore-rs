@@ -139,14 +139,14 @@ impl Backend {
         Ok(())
     }
 
-    fn z_rem<'a, K: Into<Arg<'a>> + Send, V: Into<Arg<'a>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, value: V) -> Result<()> {
+    fn zh_rem<'a, K: Into<Arg<'a>> + Send, F: Into<Arg<'a>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, field: F) -> Result<()> {
         let key = key.into();
-        let value = value.into();
+        let field = field.into();
         match m.get_mut(key.as_bytes()) {
             Some(MapEntry::SortedSet(s)) => {
-                if let Some(&previous_score) = s.scores_by_member.get(value.as_bytes()) {
-                    s.scores_by_member.remove(value.as_bytes());
-                    s.m.remove(&[&float_sort_key(previous_score), value.as_bytes()].concat());
+                if let Some(&previous_score) = s.scores_by_member.get(field.as_bytes()) {
+                    s.scores_by_member.remove(field.as_bytes());
+                    s.m.remove(&[&float_sort_key(previous_score), field.as_bytes()].concat());
                 }
             }
             _ => {}
@@ -377,6 +377,7 @@ impl super::Backend for Backend {
                 AtomicWriteSubOperation::ZAdd(..) => None,
                 AtomicWriteSubOperation::ZHAdd(..) => None,
                 AtomicWriteSubOperation::ZRem(..) => None,
+                AtomicWriteSubOperation::ZHRem(..) => None,
                 AtomicWriteSubOperation::Delete(..) => None,
                 AtomicWriteSubOperation::DeleteXX(key, tx) => {
                     if !m.contains_key(key.as_bytes()) {
@@ -434,7 +435,10 @@ impl super::Backend for Backend {
                     Self::zh_add(&mut m, key, field, value, score)?;
                 }
                 AtomicWriteSubOperation::ZRem(key, value) => {
-                    Self::z_rem(&mut m, key, value)?;
+                    Self::zh_rem(&mut m, key, value)?;
+                }
+                AtomicWriteSubOperation::ZHRem(key, field) => {
+                    Self::zh_rem(&mut m, key, field)?;
                 }
                 AtomicWriteSubOperation::HSet(key, fields) => {
                     Self::h_set(&mut m, key, fields)?;

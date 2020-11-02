@@ -578,6 +578,14 @@ impl super::Backend for Backend {
                     item.delete = Some(delete);
                     (item, None)
                 }
+                AtomicWriteSubOperation::ZHRem(key, field) => {
+                    let mut delete = Delete::default();
+                    delete.table_name = self.table_name.clone();
+                    delete.key = composite_key(key, field);
+                    let mut item = TransactWriteItem::default();
+                    item.delete = Some(delete);
+                    (item, None)
+                }
                 AtomicWriteSubOperation::HSet(key, fields) => {
                     let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
                         .into_iter()

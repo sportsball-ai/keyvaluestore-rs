@@ -483,6 +483,15 @@ macro_rules! test_backend {
             assert_eq!(b.exec_atomic_write(tx).await.unwrap(), true);
 
             assert_eq!(b.zh_count("zhash", 0.0, 10.0).await.unwrap(), 2);
+
+            // ZHRem
+            {
+                let mut tx = AtomicWriteOperation::new();
+                tx.zh_rem("zhash", "f");
+                assert_eq!(b.exec_atomic_write(tx).await.unwrap(), true);
+
+                assert_eq!(b.zh_count("zhash", 0.0, 10.0).await.unwrap(), 1);
+            }
         }
 
         #[tokio::test]

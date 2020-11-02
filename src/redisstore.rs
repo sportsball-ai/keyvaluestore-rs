@@ -337,6 +337,13 @@ impl super::Backend for Backend {
                     args: vec![value],
                     failure_tx: None,
                 },
+                AtomicWriteSubOperation::ZHRem(key, field) => SubOp {
+                    keys: vec![[ZH_HASH_KEY_PREFIX.as_bytes(), key.as_bytes()].concat().into(), key],
+                    condition: "true",
+                    write: "redis.call('zrem', @1, $0)\nredis.call('hdel', @0, $0)".to_string(),
+                    args: vec![field],
+                    failure_tx: None,
+                },
                 AtomicWriteSubOperation::HSet(key, fields) => {
                     let mut args = Vec::new();
                     for field in fields {
