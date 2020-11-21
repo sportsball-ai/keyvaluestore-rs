@@ -48,7 +48,7 @@ impl Backend {
                 s.insert(value);
                 m.insert(key.into_vec(), MapEntry::Set(s));
             }
-            _ => return Err(Box::new(SimpleError::new("attempt to add member to existing non-set value"))),
+            _ => return Err(SimpleError::new("attempt to add member to existing non-set value").into()),
         }
         Ok(())
     }
@@ -134,7 +134,7 @@ impl Backend {
                 s.m.insert([&float_sort_key(score), field.as_bytes()].concat(), value.into_vec());
                 m.insert(key.into_vec(), MapEntry::SortedSet(s));
             }
-            _ => return Err(Box::new(SimpleError::new("attempt to add sorted set member to existing non-sorted-set value"))),
+            _ => return Err(SimpleError::new("attempt to add sorted set member to existing non-sorted-set value").into()),
         }
         Ok(())
     }
@@ -359,7 +359,7 @@ impl super::Backend for Backend {
 
     async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {
         if op.ops.len() > MAX_ATOMIC_WRITE_SUB_OPERATIONS {
-            return Err(Box::new(SimpleError::new("max sub-operation count exceeded")));
+            return Err(SimpleError::new("max sub-operation count exceeded").into());
         }
 
         let mut m = self.m.lock().unwrap();
@@ -401,7 +401,7 @@ impl super::Backend for Backend {
                 match failure_tx.try_send(true) {
                     Ok(_) => {}
                     Err(mpsc::TrySendError::Disconnected(_)) => {}
-                    Err(e) => return Err(Box::new(e)),
+                    Err(e) => return Err(e.into()),
                 }
                 return Ok(false);
             }

@@ -235,7 +235,7 @@ impl super::Backend for Backend {
                         BatchSubOperation::Get(_, tx) => match tx.try_send(v) {
                             Ok(_) => {}
                             Err(mpsc::TrySendError::Disconnected(_)) => {}
-                            Err(e) => return Err(Box::new(e)),
+                            Err(e) => return Err(e.into()),
                         },
                     }
                 }
@@ -247,7 +247,7 @@ impl super::Backend for Backend {
                         (BatchSubOperation::Get(_, tx), Some(v)) => match tx.try_send(v) {
                             Ok(_) => {}
                             Err(mpsc::TrySendError::Disconnected(_)) => {}
-                            Err(e) => return Err(Box::new(e)),
+                            Err(e) => return Err(e.into()),
                         },
                         (_, None) => {}
                     }
@@ -259,7 +259,7 @@ impl super::Backend for Backend {
 
     async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {
         if op.ops.len() > MAX_ATOMIC_WRITE_SUB_OPERATIONS {
-            return Err(Box::new(SimpleError::new("max sub-operation count exceeded")));
+            return Err(SimpleError::new("max sub-operation count exceeded").into());
         }
 
         struct SubOp<'a> {
@@ -428,7 +428,7 @@ impl super::Backend for Backend {
 
         let results: Vec<Option<()>> = invocation.invoke_async(&mut self.get_connection().await?).await?;
         if results.len() != failure_txs.len() {
-            return Err(Box::new(SimpleError::new("not enough return values")));
+            return Err(SimpleError::new("not enough return values").into());
         }
 
         let mut ret = true;
@@ -440,10 +440,10 @@ impl super::Backend for Backend {
                     match tx.try_send(true) {
                         Ok(_) => {}
                         Err(mpsc::TrySendError::Disconnected(_)) => {}
-                        Err(e) => return Err(Box::new(e)),
+                        Err(e) => return Err(e.into()),
                     }
                 }
-                (None, None) => return Err(Box::new(SimpleError::new("unconditional sub-op failed"))),
+                (None, None) => return Err(SimpleError::new("unconditional sub-op failed").into()),
             }
         }
         Ok(ret)

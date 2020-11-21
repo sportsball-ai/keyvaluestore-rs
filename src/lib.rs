@@ -5,8 +5,7 @@ extern crate async_trait;
 extern crate serial_test;
 extern crate simple_error;
 
-use std::sync::mpsc;
-use std::{collections::HashMap, convert::From};
+use std::{collections::HashMap, convert::From, fmt, sync::mpsc};
 
 pub mod backendtest;
 pub mod dynamodbstore;
@@ -20,7 +19,30 @@ pub use rusoto_core;
 pub use rusoto_credential;
 pub use rusoto_dynamodb;
 
-type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+#[derive(Debug)]
+pub enum Error {
+    // AtomicWriteConflict happens when an atomic write fails due to contention (but not due to a
+    // failed conditional). For example, in DynamoDB this error happens when a transaction fails
+    // due to a TransactionConflict.
+    AtomicWriteConflict,
+    Other(Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
+    fn from(e: E) -> Self {
+        Self::Other(Box::new(e))
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AtomicWriteConflict => write!(f, "atomic write conflict"),
+            Self::Other(e) => e.fmt(f),
+        }
+    }
+}
+
 type Result<T> = std::result::Result<T, Error>;
 
 pub enum Arg<'a> {
@@ -183,7 +205,7 @@ pub trait Backend {
                         match tx.try_send(v) {
                             Ok(_) => {}
                             Err(mpsc::TrySendError::Disconnected(_)) => {}
-                            Err(e) => return Err(Box::new(e)),
+                            Err(e) => return Err(e.into()),
                         }
                     }
                 }

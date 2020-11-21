@@ -1,4 +1,4 @@
-use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Result, Value};
+use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Error, Result, Value};
 use core::{future::Future, pin::Pin};
 use rand::RngCore;
 use rusoto_core::RusotoError;
@@ -641,20 +641,26 @@ impl super::Backend for Backend {
 
         match self.client.transact_write_items(tx).await {
             Err(RusotoError::Service(rusoto_dynamodb::TransactWriteItemsError::TransactionCanceled { reasons, .. })) => {
+                let mut did_fail_conditional = false;
                 for (i, reason) in reasons.iter().enumerate() {
                     if let Some(code) = &reason.code {
                         if code == "ConditionalCheckFailed" {
+                            did_fail_conditional = true;
                             if let Some(Some(tx)) = failure_txs.get(i) {
                                 match tx.try_send(true) {
                                     Ok(_) => {}
                                     Err(mpsc::TrySendError::Disconnected(_)) => {}
-                                    Err(e) => return Err(Box::new(e)),
+                                    Err(e) => return Err(e.into()),
                                 }
                             }
                         }
                     }
                 }
-                Ok(false)
+                if did_fail_conditional {
+                    Ok(false)
+                } else {
+                    Err(Error::AtomicWriteConflict)
+                }
             }
             Err(e) => Err(e.into()),
             Ok(_) => Ok(true),
