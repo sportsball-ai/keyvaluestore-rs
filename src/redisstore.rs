@@ -179,6 +179,10 @@ impl super::Backend for Backend {
         Ok(())
     }
 
+    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        Ok(self.get_connection().await?.zrem(key.into(), value.into()).await?)
+    }
+
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         Ok(self.get_connection().await?.zcount(key.into(), min, max).await?)
     }

@@ -351,6 +351,14 @@ impl super::Backend for Backend {
         Ok(())
     }
 
+    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        let mut delete = rusoto_dynamodb::DeleteItemInput::default();
+        delete.table_name = self.table_name.clone();
+        delete.key = composite_key(key, value);
+        self.client.delete_item(delete).await?;
+        Ok(())
+    }
+
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         if min > max {
             return Ok(0);

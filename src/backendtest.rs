@@ -178,6 +178,23 @@ macro_rules! test_backend {
 
         #[tokio::test]
         #[serial]
+        async fn test_z_rem() {
+            let b = $f().await;
+
+            b.z_add("foo", "a", 0.0).await.unwrap();
+            b.z_add("foo", "b", 1.0).await.unwrap();
+
+            let members = b.z_range_by_score("foo", 0.0, 10.0, 0).await.unwrap();
+            assert_eq!(vec!["a", "b"], members);
+
+            b.z_rem("foo", "a").await.unwrap();
+
+            let members = b.z_range_by_score("foo", 0.0, 10.0, 0).await.unwrap();
+            assert_eq!(vec!["b"], members);
+        }
+
+        #[tokio::test]
+        #[serial]
         async fn test_zh_range_by_score() {
             let b = $f().await;
 
