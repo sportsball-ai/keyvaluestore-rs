@@ -114,6 +114,14 @@ impl super::Backend for Backend {
         }
     }
 
+    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        match self {
+            Self::Memory(backend) => backend.z_rem(key, value).await,
+            Self::Redis(backend) => backend.z_rem(key, value).await,
+            Self::DynamoDB(backend) => backend.z_rem(key, value).await,
+        }
+    }
+
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         match self {
             Self::Memory(backend) => backend.z_count(key, min, max).await,

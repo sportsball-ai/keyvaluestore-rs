@@ -139,7 +139,7 @@ impl Backend {
         Ok(())
     }
 
-    fn zh_rem<'a, K: Into<Arg<'a>> + Send, F: Into<Arg<'a>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, field: F) -> Result<()> {
+    fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, field: F) -> Result<()> {
         let key = key.into();
         let field = field.into();
         match m.get_mut(key.as_bytes()) {
@@ -294,6 +294,11 @@ impl super::Backend for Backend {
     ) -> Result<()> {
         let mut m = self.m.lock().unwrap();
         Self::zh_add(&mut m, key, field, value, score)
+    }
+
+    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        let mut m = self.m.lock().unwrap();
+        Self::zh_rem(&mut m, key, value)
     }
 
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
