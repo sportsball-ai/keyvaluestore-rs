@@ -27,6 +27,10 @@ impl<B> Backend<B> {
         Self { inner, cache: Arc::default() }
     }
 
+    pub fn into_inner(self) -> B {
+        self.inner
+    }
+
     fn load(&self, key: &Arg<'_>) -> Option<Entry> {
         self.cache.lock().unwrap().get(key.as_bytes()).cloned()
     }
