@@ -3,6 +3,7 @@ use redis::{aio::Connection, AsyncCommands, Client, FromRedisValue, RedisResult,
 use simple_error::SimpleError;
 use std::{collections::HashMap, sync::mpsc};
 
+#[derive(Clone)]
 pub struct Backend {
     pub client: Client,
 }

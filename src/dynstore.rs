@@ -1,10 +1,12 @@
-use super::{dynamodbstore, memorystore, redisstore, Arg, AtomicWriteOperation, BatchOperation, Result, Value};
+use super::{dynamodbstore, memorystore, readcache, redisstore, Arg, AtomicWriteOperation, BatchOperation, Result, Value};
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub enum Backend {
     Memory(memorystore::Backend),
     Redis(redisstore::Backend),
     DynamoDB(dynamodbstore::Backend),
+    ReadCache(Box<readcache::Backend<Backend>>),
 }
 
 #[async_trait]
@@ -14,6 +16,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.get(key).await,
             Self::Redis(backend) => backend.get(key).await,
             Self::DynamoDB(backend) => backend.get(key).await,
+            Self::ReadCache(backend) => backend.get(key).await,
         }
     }
 
@@ -22,6 +25,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.set(key, value).await,
             Self::Redis(backend) => backend.set(key, value).await,
             Self::DynamoDB(backend) => backend.set(key, value).await,
+            Self::ReadCache(backend) => backend.set(key, value).await,
         }
     }
 
@@ -35,6 +39,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.set_eq(key, value, old_value).await,
             Self::Redis(backend) => backend.set_eq(key, value, old_value).await,
             Self::DynamoDB(backend) => backend.set_eq(key, value, old_value).await,
+            Self::ReadCache(backend) => backend.set_eq(key, value, old_value).await,
         }
     }
 
@@ -43,6 +48,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.set_nx(key, value).await,
             Self::Redis(backend) => backend.set_nx(key, value).await,
             Self::DynamoDB(backend) => backend.set_nx(key, value).await,
+            Self::ReadCache(backend) => backend.set_nx(key, value).await,
         }
     }
 
@@ -51,6 +57,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.delete(key).await,
             Self::Redis(backend) => backend.delete(key).await,
             Self::DynamoDB(backend) => backend.delete(key).await,
+            Self::ReadCache(backend) => backend.delete(key).await,
         }
     }
 
@@ -59,6 +66,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.s_add(key, value).await,
             Self::Redis(backend) => backend.s_add(key, value).await,
             Self::DynamoDB(backend) => backend.s_add(key, value).await,
+            Self::ReadCache(backend) => backend.s_add(key, value).await,
         }
     }
 
@@ -67,6 +75,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.s_members(key).await,
             Self::Redis(backend) => backend.s_members(key).await,
             Self::DynamoDB(backend) => backend.s_members(key).await,
+            Self::ReadCache(backend) => backend.s_members(key).await,
         }
     }
 
@@ -79,6 +88,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.h_set(key, fields).await,
             Self::Redis(backend) => backend.h_set(key, fields).await,
             Self::DynamoDB(backend) => backend.h_set(key, fields).await,
+            Self::ReadCache(backend) => backend.h_set(key, fields).await,
         }
     }
 
@@ -87,6 +97,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.h_del(key, fields).await,
             Self::Redis(backend) => backend.h_del(key, fields).await,
             Self::DynamoDB(backend) => backend.h_del(key, fields).await,
+            Self::ReadCache(backend) => backend.h_del(key, fields).await,
         }
     }
 
@@ -95,6 +106,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.h_get(key, field).await,
             Self::Redis(backend) => backend.h_get(key, field).await,
             Self::DynamoDB(backend) => backend.h_get(key, field).await,
+            Self::ReadCache(backend) => backend.h_get(key, field).await,
         }
     }
 
@@ -103,6 +115,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.h_get_all(key).await,
             Self::Redis(backend) => backend.h_get_all(key).await,
             Self::DynamoDB(backend) => backend.h_get_all(key).await,
+            Self::ReadCache(backend) => backend.h_get_all(key).await,
         }
     }
 
@@ -111,6 +124,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.z_add(key, value, score).await,
             Self::Redis(backend) => backend.z_add(key, value, score).await,
             Self::DynamoDB(backend) => backend.z_add(key, value, score).await,
+            Self::ReadCache(backend) => backend.z_add(key, value, score).await,
         }
     }
 
@@ -119,6 +133,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.z_rem(key, value).await,
             Self::Redis(backend) => backend.z_rem(key, value).await,
             Self::DynamoDB(backend) => backend.z_rem(key, value).await,
+            Self::ReadCache(backend) => backend.z_rem(key, value).await,
         }
     }
 
@@ -127,6 +142,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.z_count(key, min, max).await,
             Self::Redis(backend) => backend.z_count(key, min, max).await,
             Self::DynamoDB(backend) => backend.z_count(key, min, max).await,
+            Self::ReadCache(backend) => backend.z_count(key, min, max).await,
         }
     }
 
@@ -135,6 +151,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.z_range_by_score(key, min, max, limit).await,
             Self::Redis(backend) => backend.z_range_by_score(key, min, max, limit).await,
             Self::DynamoDB(backend) => backend.z_range_by_score(key, min, max, limit).await,
+            Self::ReadCache(backend) => backend.z_range_by_score(key, min, max, limit).await,
         }
     }
 
@@ -143,6 +160,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.z_rev_range_by_score(key, min, max, limit).await,
             Self::Redis(backend) => backend.z_rev_range_by_score(key, min, max, limit).await,
             Self::DynamoDB(backend) => backend.z_rev_range_by_score(key, min, max, limit).await,
+            Self::ReadCache(backend) => backend.z_rev_range_by_score(key, min, max, limit).await,
         }
     }
 
@@ -157,6 +175,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.zh_add(key, field, value, score).await,
             Self::Redis(backend) => backend.zh_add(key, field, value, score).await,
             Self::DynamoDB(backend) => backend.zh_add(key, field, value, score).await,
+            Self::ReadCache(backend) => backend.zh_add(key, field, value, score).await,
         }
     }
 
@@ -165,6 +184,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.zh_count(key, min, max).await,
             Self::Redis(backend) => backend.zh_count(key, min, max).await,
             Self::DynamoDB(backend) => backend.zh_count(key, min, max).await,
+            Self::ReadCache(backend) => backend.zh_count(key, min, max).await,
         }
     }
 
@@ -173,6 +193,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.zh_range_by_score(key, min, max, limit).await,
             Self::Redis(backend) => backend.zh_range_by_score(key, min, max, limit).await,
             Self::DynamoDB(backend) => backend.zh_range_by_score(key, min, max, limit).await,
+            Self::ReadCache(backend) => backend.zh_range_by_score(key, min, max, limit).await,
         }
     }
 
@@ -181,6 +202,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
             Self::Redis(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
             Self::DynamoDB(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
+            Self::ReadCache(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
         }
     }
 
@@ -189,6 +211,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.exec_batch(op).await,
             Self::Redis(backend) => backend.exec_batch(op).await,
             Self::DynamoDB(backend) => backend.exec_batch(op).await,
+            Self::ReadCache(backend) => backend.exec_batch(op).await,
         }
     }
 
@@ -197,6 +220,7 @@ impl super::Backend for Backend {
             Self::Memory(backend) => backend.exec_atomic_write(op).await,
             Self::Redis(backend) => backend.exec_atomic_write(op).await,
             Self::DynamoDB(backend) => backend.exec_atomic_write(op).await,
+            Self::ReadCache(backend) => backend.exec_atomic_write(op).await,
         }
     }
 }

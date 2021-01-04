@@ -11,6 +11,7 @@ pub mod backendtest;
 pub mod dynamodbstore;
 pub mod dynstore;
 pub mod memorystore;
+pub mod readcache;
 pub mod redisstore;
 
 // re-export these crates since we use a fork
@@ -45,6 +46,7 @@ impl fmt::Display for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone)]
 pub enum Arg<'a> {
     Owned(Vec<u8>),
     Borrowed(&'a [u8]),
@@ -115,7 +117,7 @@ impl<'a> Into<Arg<'a>> for &'a String {
     }
 }
 
-#[derive(Debug, PartialEq, PartialOrd, Ord, Eq)]
+#[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Eq)]
 pub struct Value(Vec<u8>);
 
 impl<T: Into<Vec<u8>>> From<T> for Value {
