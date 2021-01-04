@@ -2,7 +2,7 @@ use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, Result, Value, M
 use simple_error::SimpleError;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 struct SortedSet {
     scores_by_member: HashMap<Vec<u8>, f64>,
@@ -16,13 +16,16 @@ enum MapEntry {
     Map(HashMap<Vec<u8>, Vec<u8>>),
 }
 
+#[derive(Clone)]
 pub struct Backend {
-    m: Mutex<HashMap<Vec<u8>, MapEntry>>,
+    m: Arc<Mutex<HashMap<Vec<u8>, MapEntry>>>,
 }
 
 impl Backend {
     pub fn new() -> Self {
-        Self { m: Mutex::new(HashMap::new()) }
+        Self {
+            m: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     fn get<'a, K: Into<Arg<'a>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K) -> Option<Value> {

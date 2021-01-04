@@ -9,6 +9,7 @@ use rusoto_dynamodb::{
 use std::collections::HashMap;
 use std::sync::mpsc;
 
+#[derive(Clone)]
 pub struct Backend {
     pub allow_eventually_consistent_reads: bool,
     pub client: DynamoDbClient,
