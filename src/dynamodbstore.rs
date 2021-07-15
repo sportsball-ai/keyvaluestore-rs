@@ -1,4 +1,4 @@
-use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Error, Result, Value};
+use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Bound, Error, Result, Value};
 use core::{future::Future, pin::Pin};
 use rand::RngCore;
 use rusoto_core::RusotoError;
@@ -68,20 +68,39 @@ fn float_sort_key_after(f: f64) -> Option<[u8; 8]> {
     }
 }
 
-enum Bound<'a> {
+enum ArgBound<'a> {
     Inclusive(Arg<'a>),
     Unbounded,
 }
 
-fn query_condition<'k, K: Into<Arg<'k>>>(key: K, min: Bound<'_>, max: Bound<'_>, secondary_index: bool) -> (String, HashMap<String, AttributeValue>) {
+impl<'a> ArgBound<'a> {
+    fn inclusive_from(arg: &'a Bound<Arg<'a>>) -> Self {
+        match arg {
+            Bound::Included(arg) => Self::Inclusive(arg.as_bytes().into()),
+            Bound::Excluded(arg) => Self::Inclusive(arg.as_bytes().into()),
+            Bound::Unbounded => Self::Unbounded,
+        }
+    }
+}
+
+impl<'a> Into<Bound<Arg<'a>>> for ArgBound<'a> {
+    fn into(self) -> Bound<Arg<'a>> {
+        match self {
+            Self::Inclusive(a) => Bound::Included(a),
+            Self::Unbounded => Bound::Unbounded,
+        }
+    }
+}
+
+fn query_condition<'k, K: Into<Arg<'k>>>(key: K, min: ArgBound<'_>, max: ArgBound<'_>, secondary_index: bool) -> (String, HashMap<String, AttributeValue>) {
     let mut attribute_values = HashMap::new();
     attribute_values.insert(":hash".to_string(), attribute_value(key));
 
-    if let Bound::Inclusive(min) = &min {
+    if let ArgBound::Inclusive(min) = &min {
         attribute_values.insert(":minSort".to_string(), attribute_value(min));
     }
 
-    if let Bound::Inclusive(max) = &max {
+    if let ArgBound::Inclusive(max) = &max {
         attribute_values.insert(":maxSort".to_string(), attribute_value(max));
     }
 
@@ -91,25 +110,42 @@ fn query_condition<'k, K: Into<Arg<'k>>>(key: K, min: Bound<'_>, max: Bound<'_>,
     };
 
     let condition = match (min, max) {
-        (Bound::Inclusive(_), Bound::Inclusive(_)) => format!("hk = :hash AND {} BETWEEN :minSort AND :maxSort", range_key),
-        (Bound::Inclusive(_), Bound::Unbounded) => format!("hk = :hash AND {} >= :minSort", range_key),
-        (Bound::Unbounded, Bound::Inclusive(_)) => format!("hk = :hash AND {} <= :maxSort", range_key),
-        (Bound::Unbounded, Bound::Unbounded) => "hk = :hash".to_string(),
+        (ArgBound::Inclusive(_), ArgBound::Inclusive(_)) => format!("hk = :hash AND {} BETWEEN :minSort AND :maxSort", range_key),
+        (ArgBound::Inclusive(_), ArgBound::Unbounded) => format!("hk = :hash AND {} >= :minSort", range_key),
+        (ArgBound::Unbounded, ArgBound::Inclusive(_)) => format!("hk = :hash AND {} <= :maxSort", range_key),
+        (ArgBound::Unbounded, ArgBound::Unbounded) => "hk = :hash".to_string(),
     };
 
     (condition, attribute_values)
 }
 
-fn bounds(min: f64, max: f64) -> (Bound<'static>, Bound<'static>) {
+fn score_bounds(min: f64, max: f64) -> (ArgBound<'static>, ArgBound<'static>) {
     let min = float_sort_key(min);
     let max = float_sort_key_after(max);
     (
-        Bound::Inclusive(min.to_vec().into()),
+        ArgBound::Inclusive(min.to_vec().into()),
         match &max {
-            Some(max) => Bound::Inclusive(max.to_vec().into()),
-            None => Bound::Unbounded,
+            Some(max) => ArgBound::Inclusive(max.to_vec().into()),
+            None => ArgBound::Unbounded,
         },
     )
+}
+
+fn map_bound<T, U, F: FnOnce(T) -> U>(b: Bound<T>, f: F) -> Bound<U> {
+    match b {
+        Bound::Included(v) => Bound::Included(f(v)),
+        Bound::Excluded(v) => Bound::Excluded(f(v)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+fn lex_bound<'a, T: Into<Arg<'a>>>(score: f64, b: Bound<T>) -> Bound<Vec<u8>> {
+    let prefix = float_sort_key(score);
+    map_bound(b, |v| [&prefix, v.into().as_bytes()].concat())
+}
+
+fn lex_bounds<'m, 'n, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(score: f64, min: Bound<M>, max: Bound<N>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    (lex_bound(score, min), lex_bound(score, max))
 }
 
 fn encode_field_name(name: &[u8]) -> String {
@@ -125,16 +161,28 @@ fn decode_field_name(name: &String) -> Option<Vec<u8>> {
 }
 
 impl Backend {
-    async fn z_range_by_lex<'k, K: Into<Arg<'k>>>(
+    async fn z_range_impl<'k, 'm, 'n, K: Into<Arg<'k>>, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(
         &self,
         key: K,
-        min: Bound<'_>,
-        max: Bound<'_>,
+        min: Bound<M>,
+        max: Bound<N>,
         limit: usize,
         reverse: bool,
         secondary_index: bool,
     ) -> Result<Vec<Value>> {
-        let (condition, attribute_values) = query_condition(key, min, max, secondary_index);
+        let min = map_bound(min, |v| v.into());
+        let max = map_bound(max, |v| v.into());
+
+        let inclusive_min = ArgBound::inclusive_from(&min);
+        let inclusive_max = ArgBound::inclusive_from(&max);
+
+        if let (ArgBound::Inclusive(min), ArgBound::Inclusive(max)) = (&inclusive_min, &inclusive_max) {
+            if min.as_bytes() > max.as_bytes() {
+                return Ok(vec![]);
+            }
+        }
+
+        let (condition, attribute_values) = query_condition(key, inclusive_min, inclusive_max, secondary_index);
 
         let mut query = rusoto_dynamodb::QueryInput::default();
         query.table_name = self.table_name.clone();
@@ -149,11 +197,45 @@ impl Backend {
         while limit == 0 || members.len() < limit {
             let mut q = query.clone();
             if limit > 0 {
-                q.limit = Some((limit - members.len()) as _);
+                q.limit = Some((limit - members.len() + 1) as _);
             }
             let result = self.client.query(q).await?;
-            if let Some(items) = result.items {
-                members.extend(items.into_iter().filter_map(|mut v| v.remove("v").and_then(|v| v.b).map(|v| v.to_vec().into())));
+            if let Some(mut items) = result.items {
+                let mut skip = 0;
+
+                // dynamodb can't express exclusive ranges so we did an inclusive query. that means
+                // we may need to skip the first or last result
+                if !items.is_empty() {
+                    if members.is_empty() {
+                        if let Bound::Excluded(excluded_key) = if reverse { &max } else { &min } {
+                            if let Some(first_item_key) = items[0].get(if secondary_index { "rk2" } else { "rk" }).and_then(|v| v.b.as_ref()) {
+                                if excluded_key.as_bytes() == first_item_key {
+                                    skip = 1;
+                                }
+                            }
+                        }
+                    }
+
+                    if result.last_evaluated_key.is_none() {
+                        if let Bound::Excluded(excluded_key) = if reverse { &min } else { &max } {
+                            if let Some(last_item_key) = items
+                                .last()
+                                .and_then(|item| item.get(if secondary_index { "rk2" } else { "rk" }).and_then(|v| v.b.as_ref()))
+                            {
+                                if excluded_key.as_bytes() == last_item_key {
+                                    items.pop();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                members.extend(
+                    items
+                        .into_iter()
+                        .skip(skip)
+                        .filter_map(|mut v| v.remove("v").and_then(|v| v.b).map(|v| v.to_vec().into())),
+                );
             }
             match result.last_evaluated_key {
                 Some(key) => query.exclusive_start_key = Some(key),
@@ -161,6 +243,9 @@ impl Backend {
             }
         }
 
+        while limit > 0 && members.len() > limit {
+            members.pop();
+        }
         Ok(members)
     }
 }
@@ -365,7 +450,7 @@ impl super::Backend for Backend {
             return Ok(0);
         }
 
-        let (min, max) = bounds(min, max);
+        let (min, max) = score_bounds(min, max);
         let (condition, attribute_values) = query_condition(key, min, max, true);
 
         let mut query = rusoto_dynamodb::QueryInput::default();
@@ -397,11 +482,8 @@ impl super::Backend for Backend {
     }
 
     async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
-        if min > max {
-            return Ok(vec![]);
-        }
-        let (min, max) = bounds(min, max);
-        self.z_range_by_lex(key, min, max, limit, false, true).await
+        let (min, max) = score_bounds(min, max);
+        self.z_range_impl(key, min.into(), max.into(), limit, false, true).await
     }
 
     async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
@@ -409,15 +491,34 @@ impl super::Backend for Backend {
     }
 
     async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
-        if min > max {
-            return Ok(vec![]);
-        }
-        let (min, max) = bounds(min, max);
-        self.z_range_by_lex(key, min, max, limit, true, true).await
+        let (min, max) = score_bounds(min, max);
+        self.z_range_impl(key, min.into(), max.into(), limit, true, true).await
     }
 
     async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.z_rev_range_by_score(key, min, max, limit).await
+    }
+
+    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let (min, max) = lex_bounds(0.0, min, max);
+        self.z_range_impl(key, min, max, limit, false, true).await
+    }
+
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let (min, max) = lex_bounds(0.0, min, max);
+        self.z_range_impl(key, min, max, limit, true, true).await
     }
 
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {

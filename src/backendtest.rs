@@ -2,6 +2,7 @@
 macro_rules! test_backend {
     ($f:expr) => {
         use crate::{AtomicWriteOperation, Backend, BatchOperation};
+        use std::ops::Bound;
 
         #[tokio::test]
         #[serial]
@@ -174,6 +175,78 @@ macro_rules! test_backend {
                 let members = b.z_range_by_score("update-test", 2.5, 3.5, 0).await.unwrap();
                 assert_eq!(vec!["foo"], members);
             }
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn test_z_range_by_lex() {
+            let b = $f().await;
+
+            b.z_add("foo", "a", 0.0).await.unwrap();
+            b.z_add("foo", "b", 0.0).await.unwrap();
+            b.z_add("foo", "c", 0.0).await.unwrap();
+            b.z_add("foo", "d", 0.0).await.unwrap();
+
+            // Inf
+            let members = b
+                .z_range_by_lex("foo", Bound::<&str>::Unbounded, Bound::<&str>::Unbounded, 0)
+                .await
+                .unwrap();
+            assert_eq!(vec!["a", "b", "c", "d"], members);
+
+            /*
+            // MinGreaterThanMax
+            let members = b.z_range_by_lex("foo", Bound::Excluded("d"), Bound::Excluded("a"), 0).await.unwrap();
+            assert_eq!(members.is_empty(), true);
+            */
+
+            // MinMaxExclusive
+            let members = b.z_range_by_lex("foo", Bound::Excluded("a"), Bound::Excluded("d"), 0).await.unwrap();
+            assert_eq!(vec!["b", "c"], members);
+
+            /*
+            // MinMaxInclusive
+            let members = b.z_range_by_lex("foo", Bound::Included("a"), Bound::Included("d"), 0).await.unwrap();
+            assert_eq!(vec!["a", "b", "c", "d"], members);
+
+            // RangeInclusive
+            let members = b.z_range_by_lex("foo", Bound::Included("b"), Bound::Included("c"), 0).await.unwrap();
+            assert_eq!(vec!["b", "c"], members);
+
+            // SingleElement
+            let members = b.z_range_by_lex("foo", Bound::Included("b"), Bound::Included("b"), 0).await.unwrap();
+            assert_eq!(vec!["b"], members);
+
+            // SingleAbsentElement
+            let members = b.z_range_by_lex("foo", Bound::Included("z"), Bound::Included("z"), 1).await.unwrap();
+            assert_eq!(members.is_empty(), true);
+
+            // Rev
+            {
+                // Inf
+                let members = b
+                    .z_rev_range_by_lex("foo", Bound::<&str>::Unbounded, Bound::<&str>::Unbounded, 0)
+                    .await
+                    .unwrap();
+                assert_eq!(vec!["d", "c", "b", "a"], members);
+
+                // MinMaxExclusive
+                let members = b.z_rev_range_by_lex("foo", Bound::Excluded("a"), Bound::Excluded("d"), 0).await.unwrap();
+                assert_eq!(vec!["c", "b"], members);
+
+                // MinMaxInclusive
+                let members = b.z_rev_range_by_lex("foo", Bound::Included("a"), Bound::Included("d"), 0).await.unwrap();
+                assert_eq!(vec!["d", "c", "b", "a"], members);
+
+                // RangeInclusive
+                let members = b.z_rev_range_by_lex("foo", Bound::Included("b"), Bound::Included("c"), 0).await.unwrap();
+                assert_eq!(vec!["c", "b"], members);
+
+                // SingleAbsentElement
+                let members = b.z_rev_range_by_lex("foo", Bound::Included("z"), Bound::Included("z"), 1).await.unwrap();
+                assert_eq!(members.is_empty(), true);
+            }
+            */
         }
 
         #[tokio::test]
