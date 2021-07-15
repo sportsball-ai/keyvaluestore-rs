@@ -195,6 +195,14 @@ fn map_bound<T, U, F: FnOnce(T) -> U>(b: Bound<T>, f: F) -> Bound<U> {
     }
 }
 
+fn bound_value<T>(b: &Bound<T>) -> Option<&T> {
+    match b {
+        Bound::Included(v) => Some(v),
+        Bound::Excluded(v) => Some(v),
+        Bound::Unbounded => None,
+    }
+}
+
 #[async_trait]
 impl super::Backend for Backend {
     async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>> {
@@ -391,6 +399,12 @@ impl super::Backend for Backend {
         let min = map_bound(min, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
         let max = map_bound(max, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
 
+        if let (Some(min), Some(max)) = (bound_value(&min), bound_value(&max)) {
+            if min > max {
+                return Ok(vec![]);
+            }
+        }
+
         Ok(s.m
             .range((min, max))
             .take(if limit > 0 { limit } else { s.m.len() })
@@ -415,6 +429,12 @@ impl super::Backend for Backend {
 
         let min = map_bound(min, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
         let max = map_bound(max, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
+
+        if let (Some(min), Some(max)) = (bound_value(&min), bound_value(&max)) {
+            if min > max {
+                return Ok(vec![]);
+            }
+        }
 
         Ok(s.m
             .range((min, max))

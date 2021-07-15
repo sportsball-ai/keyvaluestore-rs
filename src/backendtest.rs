@@ -194,17 +194,14 @@ macro_rules! test_backend {
                 .unwrap();
             assert_eq!(vec!["a", "b", "c", "d"], members);
 
-            /*
             // MinGreaterThanMax
             let members = b.z_range_by_lex("foo", Bound::Excluded("d"), Bound::Excluded("a"), 0).await.unwrap();
             assert_eq!(members.is_empty(), true);
-            */
 
             // MinMaxExclusive
             let members = b.z_range_by_lex("foo", Bound::Excluded("a"), Bound::Excluded("d"), 0).await.unwrap();
             assert_eq!(vec!["b", "c"], members);
 
-            /*
             // MinMaxInclusive
             let members = b.z_range_by_lex("foo", Bound::Included("a"), Bound::Included("d"), 0).await.unwrap();
             assert_eq!(vec!["a", "b", "c", "d"], members);
@@ -246,7 +243,6 @@ macro_rules! test_backend {
                 let members = b.z_rev_range_by_lex("foo", Bound::Included("z"), Bound::Included("z"), 1).await.unwrap();
                 assert_eq!(members.is_empty(), true);
             }
-            */
         }
 
         #[tokio::test]
