@@ -1,6 +1,7 @@
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Result, Value};
 use std::{
     collections::HashMap,
+    ops::Bound,
     sync::{mpsc, Arc, Mutex},
 };
 
@@ -240,6 +241,26 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
 
     async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.inner.zh_rev_range_by_score(key, min, max, limit).await
+    }
+
+    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        self.inner.z_range_by_lex(key, min, max, limit).await
+    }
+
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        self.inner.z_rev_range_by_lex(key, min, max, limit).await
     }
 
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {

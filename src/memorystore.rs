@@ -1,7 +1,7 @@
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, Result, Value, MAX_ATOMIC_WRITE_SUB_OPERATIONS};
 use simple_error::SimpleError;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::ops::Bound::{self, Excluded, Included, Unbounded};
 use std::sync::{mpsc, Arc, Mutex};
 
 struct SortedSet {
@@ -187,6 +187,22 @@ fn float_sort_key_after(f: f64) -> Option<[u8; 8]> {
     }
 }
 
+fn map_bound<T, U, F: FnOnce(T) -> U>(b: Bound<T>, f: F) -> Bound<U> {
+    match b {
+        Bound::Included(v) => Bound::Included(f(v)),
+        Bound::Excluded(v) => Bound::Excluded(f(v)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+fn bound_value<T>(b: &Bound<T>) -> Option<&T> {
+    match b {
+        Bound::Included(v) => Some(v),
+        Bound::Excluded(v) => Some(v),
+        Bound::Unbounded => None,
+    }
+}
+
 #[async_trait]
 impl super::Backend for Backend {
     async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>> {
@@ -363,6 +379,69 @@ impl super::Backend for Backend {
 
     async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.z_rev_range_by_score(key, min, max, limit).await
+    }
+
+    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let m = self.m.lock().unwrap();
+        let key = key.into();
+
+        let s = match m.get(key.as_bytes()) {
+            Some(MapEntry::SortedSet(s)) => s,
+            _ => return Ok(vec![]),
+        };
+
+        let min = map_bound(min, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
+        let max = map_bound(max, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
+
+        if let (Some(min), Some(max)) = (bound_value(&min), bound_value(&max)) {
+            if min > max {
+                return Ok(vec![]);
+            }
+        }
+
+        Ok(s.m
+            .range((min, max))
+            .take(if limit > 0 { limit } else { s.m.len() })
+            .map(|(_, v)| v.clone().into())
+            .collect())
+    }
+
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let m = self.m.lock().unwrap();
+        let key = key.into();
+
+        let s = match m.get(key.as_bytes()) {
+            Some(MapEntry::SortedSet(s)) => s,
+            _ => return Ok(vec![]),
+        };
+
+        let min = map_bound(min, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
+        let max = map_bound(max, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
+
+        if let (Some(min), Some(max)) = (bound_value(&min), bound_value(&max)) {
+            if min > max {
+                return Ok(vec![]);
+            }
+        }
+
+        Ok(s.m
+            .range((min, max))
+            .rev()
+            .take(if limit > 0 { limit } else { s.m.len() })
+            .map(|(_, v)| v.clone().into())
+            .collect())
     }
 
     async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {

@@ -5,7 +5,7 @@ extern crate async_trait;
 extern crate serial_test;
 extern crate simple_error;
 
-use std::{collections::HashMap, convert::From, fmt, sync::mpsc};
+use std::{collections::HashMap, convert::From, fmt, ops::Bound, sync::mpsc};
 
 pub mod backendtest;
 pub mod dynamodbstore;
@@ -188,6 +188,20 @@ pub trait Backend {
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize>;
     async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
     async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
+    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>>;
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>>;
 
     async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
         &self,

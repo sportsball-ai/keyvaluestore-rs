@@ -1,7 +1,7 @@
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Result, Value, MAX_ATOMIC_WRITE_SUB_OPERATIONS};
 use redis::{aio::Connection, AsyncCommands, Client, FromRedisValue, RedisResult, RedisWrite, Script, ToRedisArgs};
 use simple_error::SimpleError;
-use std::{collections::HashMap, sync::mpsc};
+use std::{collections::HashMap, ops::Bound, sync::mpsc};
 
 #[derive(Clone)]
 pub struct Backend {
@@ -75,6 +75,14 @@ impl Backend {
         }
 
         Ok(invocation.invoke_async(&mut conn).await?)
+    }
+}
+
+fn redis_range_arg<'a, T: Into<Arg<'a>>>(b: Bound<T>, unbounded: &str) -> Vec<u8> {
+    match b {
+        Bound::Included(v) => ["[".as_bytes(), v.into().as_bytes()].concat(),
+        Bound::Excluded(v) => ["(".as_bytes(), v.into().as_bytes()].concat(),
+        Bound::Unbounded => unbounded.as_bytes().to_vec(),
     }
 }
 
@@ -222,6 +230,42 @@ impl super::Backend for Backend {
 
     async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         Self::zh_range_by_score_impl(self.get_connection().await?, "zrevrangebyscore", key, max, min, limit).await
+    }
+
+    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let min = redis_range_arg(min, "-");
+        let max = redis_range_arg(max, "+");
+        if limit > 0 {
+            Ok(self.get_connection().await?.zrangebylex_limit(key.into(), min, max, 0, limit as isize).await?)
+        } else {
+            Ok(self.get_connection().await?.zrangebylex(key.into(), min, max).await?)
+        }
+    }
+
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let min = redis_range_arg(min, "-");
+        let max = redis_range_arg(max, "+");
+        if limit > 0 {
+            Ok(self
+                .get_connection()
+                .await?
+                .zrevrangebylex_limit(key.into(), max, min, 0, limit as isize)
+                .await?)
+        } else {
+            Ok(self.get_connection().await?.zrevrangebylex(key.into(), max, min).await?)
+        }
     }
 
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {

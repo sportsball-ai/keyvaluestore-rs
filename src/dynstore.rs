@@ -1,5 +1,5 @@
 use super::{dynamodbstore, memorystore, readcache, redisstore, Arg, AtomicWriteOperation, BatchOperation, Result, Value};
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Bound};
 
 #[derive(Clone)]
 pub enum Backend {
@@ -203,6 +203,36 @@ impl super::Backend for Backend {
             Self::Redis(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
             Self::DynamoDB(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
             Self::ReadCache(backend) => backend.zh_rev_range_by_score(key, min, max, limit).await,
+        }
+    }
+
+    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        match self {
+            Self::Memory(backend) => backend.z_range_by_lex(key, min, max, limit).await,
+            Self::Redis(backend) => backend.z_range_by_lex(key, min, max, limit).await,
+            Self::DynamoDB(backend) => backend.z_range_by_lex(key, min, max, limit).await,
+            Self::ReadCache(backend) => backend.z_range_by_lex(key, min, max, limit).await,
+        }
+    }
+
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        match self {
+            Self::Memory(backend) => backend.z_rev_range_by_lex(key, min, max, limit).await,
+            Self::Redis(backend) => backend.z_rev_range_by_lex(key, min, max, limit).await,
+            Self::DynamoDB(backend) => backend.z_rev_range_by_lex(key, min, max, limit).await,
+            Self::ReadCache(backend) => backend.z_rev_range_by_lex(key, min, max, limit).await,
         }
     }
 
