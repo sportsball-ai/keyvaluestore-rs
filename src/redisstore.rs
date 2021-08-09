@@ -508,18 +508,18 @@ fn preprocess_atomic_write_expression(expr: &str, keys_offset: usize, num_keys: 
 mod test {
     mod backend {
         use crate::{redisstore, test_backend};
-        use redis::{Client, ConnectionAddr, ConnectionInfo};
+        use redis::{Client, ConnectionAddr, ConnectionInfo, RedisConnectionInfo};
 
         test_backend!(|| async {
             let addr = std::env::var("REDIS_ADDRESS").unwrap_or("127.0.0.1".to_string());
             let addr: Vec<_> = addr.split(':').collect();
             let client = Client::open(ConnectionInfo {
-                addr: Box::new(ConnectionAddr::Tcp(
-                    addr[0].to_string(),
-                    addr.get(1).map(|p| p.parse().unwrap()).unwrap_or(6379),
-                )),
-                db: 1,
-                passwd: None,
+                addr: ConnectionAddr::Tcp(addr[0].to_string(), addr.get(1).map(|p| p.parse().unwrap()).unwrap_or(6379)),
+                redis: RedisConnectionInfo {
+                    db: 1,
+                    username: None,
+                    password: None,
+                },
             })
             .unwrap();
             let mut conn = client.get_connection().unwrap();
