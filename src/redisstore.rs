@@ -24,12 +24,6 @@ impl<'a> ToRedisArgs for Arg<'a> {
     }
 }
 
-impl<'a> ToRedisArgs for &Arg<'a> {
-    fn write_redis_args<W: RedisWrite + ?Sized>(&self, out: &mut W) {
-        out.write_arg(self.as_bytes())
-    }
-}
-
 impl FromRedisValue for Value {
     fn from_redis_value(v: &redis::Value) -> RedisResult<Self> {
         Ok(match v {
