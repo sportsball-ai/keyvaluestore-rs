@@ -891,7 +891,7 @@ mod test {
                         .await
                     {
                         Err(RusotoError::Service(DescribeTableError::ResourceNotFound(_))) => break,
-                        _ => time::delay_for(time::Duration::from_millis(200)).await,
+                        _ => time::sleep(time::Duration::from_millis(200)).await,
                     }
                 }
             }

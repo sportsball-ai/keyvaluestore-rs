@@ -7,15 +7,15 @@ edition = "2018"
 [dependencies]
 async-trait = "0.1.32"
 simple-error = "0.2.1"
-redis = "0.16.0"
+redis = { version = "0.21.0", features = ["tokio-comp"] }
 # we use a fork to work around https://github.com/rusoto/rusoto/issues/1774
-rusoto_core = { git = "https://github.com/sportsball-ai/rusoto", rev = "f6d480c19dd6b1607d03bdb174ba279da31af2ec" }
-rusoto_credential = { git = "https://github.com/sportsball-ai/rusoto", rev = "f6d480c19dd6b1607d03bdb174ba279da31af2ec" }
-rusoto_dynamodb = { git = "https://github.com/sportsball-ai/rusoto", rev = "f6d480c19dd6b1607d03bdb174ba279da31af2ec" }
-bytes = "0.5.4"
+rusoto_core = { git = "https://github.com/sportsball-ai/rusoto", rev = "98e53f2ec0f21f027d8cb7a57958ee3918cd2c44" }
+rusoto_credential = { git = "https://github.com/sportsball-ai/rusoto", rev = "98e53f2ec0f21f027d8cb7a57958ee3918cd2c44" }
+rusoto_dynamodb = { git = "https://github.com/sportsball-ai/rusoto", rev = "98e53f2ec0f21f027d8cb7a57958ee3918cd2c44" }
+bytes = "1.0"
 rand = "0.7.3"
 base64 = "0.12.2"
 
 [dev-dependencies]
 serial_test = "0.4.0"
-tokio = { version = "0.2.13", features = ["macros", "rt-core"] }
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "time"] }

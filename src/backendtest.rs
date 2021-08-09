@@ -7,7 +7,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_set() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("foo", "bar").await.unwrap();
             assert_eq!(b.get("foo").await.unwrap(), Some("bar".into()));
@@ -16,7 +16,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_delete() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             assert_eq!(b.delete("foo").await.unwrap(), false);
 
@@ -30,7 +30,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_set_nx() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             assert_eq!(b.set_nx("foo", "bar").await.unwrap(), true);
             assert_eq!(b.get("foo").await.unwrap(), Some("bar".into()));
@@ -41,7 +41,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_set_eq() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("foo", "bar").await.unwrap();
             assert_eq!(b.set_eq("foo", "baz", "bar").await.unwrap(), true);
@@ -54,7 +54,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_s_add() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.s_add("foo", "bar").await.unwrap();
             assert_eq!(vec!["bar"], b.s_members("foo").await.unwrap());
@@ -69,7 +69,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_h_get() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             let v = b.h_get("foo", "bar").await.unwrap();
             assert_eq!(v, None);
@@ -83,7 +83,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_h_del() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.h_del("foo", ["bar"].iter().cloned()).await.unwrap();
 
@@ -101,7 +101,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_get_all() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.h_set("foo", [("bar", "baz"), ("baz", "qux")].iter().cloned()).await.unwrap();
 
@@ -114,7 +114,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_z_range_by_score() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.z_add("foo", "-2", -2.0).await.unwrap();
             b.z_add("foo", "-1", -1.0).await.unwrap();
@@ -180,7 +180,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_z_range_by_lex() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.z_add("foo", "a", 0.0).await.unwrap();
             b.z_add("foo", "b", 0.0).await.unwrap();
@@ -248,7 +248,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_z_rem() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.z_add("foo", "a", 0.0).await.unwrap();
             b.z_add("foo", "b", 1.0).await.unwrap();
@@ -265,7 +265,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_zh_range_by_score() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.zh_add("foo", "a", "-2", -2.0).await.unwrap();
             b.zh_add("foo", "b", "-1", -1.0).await.unwrap();
@@ -342,7 +342,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_z_count() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.z_add("foo", "a", 0.0).await.unwrap();
             b.z_add("foo", "b", 1.0).await.unwrap();
@@ -371,7 +371,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_zh_count() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.zh_add("foo", "a", "a", 0.0).await.unwrap();
             b.zh_add("foo", "b", "b", 1.0).await.unwrap();
@@ -400,7 +400,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_batch_get() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("foo", "bar").await.unwrap();
             b.set("foo2", "bar2").await.unwrap();
@@ -425,7 +425,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_set() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             let mut tx = AtomicWriteOperation::new();
             tx.set("foo", "bar");
@@ -447,7 +447,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_set_nx() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("foo", "bar").await.unwrap();
 
@@ -470,7 +470,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_delete() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("foo", "bar").await.unwrap();
             b.set("deleteme", "bar").await.unwrap();
@@ -495,7 +495,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_delete_xx() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("foo", "bar").await.unwrap();
             b.set("deleteme", "bar").await.unwrap();
@@ -520,7 +520,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_z_add() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("zsetcond", "foo").await.unwrap();
 
@@ -550,7 +550,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_zh_add() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("zhashcond", "foo").await.unwrap();
 
@@ -583,7 +583,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_s_add() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("setcond", "foo").await.unwrap();
 
@@ -615,7 +615,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_h_set() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("setcond", "foo").await.unwrap();
 
@@ -639,7 +639,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_h_set_nx() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             let mut tx = AtomicWriteOperation::new();
             tx.set("foo", "bar");
@@ -663,7 +663,7 @@ macro_rules! test_backend {
         #[tokio::test]
         #[serial]
         async fn test_atomic_write_h_del() {
-            let b = $f().await;
+            let b = ($f)().await;
 
             b.set("setcond", "foo").await.unwrap();
             b.h_set("h", [("foo", "bar")].iter().cloned()).await.unwrap();
