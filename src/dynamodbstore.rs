@@ -6,8 +6,8 @@ use rusoto_dynamodb::{
     AttributeDefinition, AttributeValue, Delete, DynamoDb, DynamoDbClient, KeySchemaElement, LocalSecondaryIndex, Projection, ProvisionedThroughput, Put,
     TransactWriteItem, Update,
 };
-use std::collections::HashMap;
-use std::sync::mpsc;
+use simple_error::SimpleError;
+use std::{collections::HashMap, sync::mpsc};
 
 #[derive(Clone)]
 pub struct Backend {
@@ -333,6 +333,23 @@ impl super::Backend for Backend {
             .and_then(|v| v.bs)
             .map(|v| v.iter().map(|v| v.to_vec().into()).collect())
             .unwrap_or(vec![]))
+    }
+
+    async fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(&self, key: K, n: i64) -> Result<i64> {
+        let mut v = AttributeValue::default();
+        v.n = Some(n.to_string());
+        let mut update = rusoto_dynamodb::UpdateItemInput::default();
+        update.key = composite_key(key, NO_SORT_KEY);
+        update.table_name = self.table_name.clone();
+        update.update_expression = Some("ADD v :n".to_string());
+        update.expression_attribute_values = Some(vec![(":n".to_string(), v)].into_iter().collect());
+        update.return_values = Some("ALL_NEW".to_string());
+        let output = self.client.update_item(update).await?;
+        let new_value = match output.attributes.and_then(|mut h| h.remove("v")).and_then(|v| v.n) {
+            Some(v) => v,
+            None => return Err(SimpleError::new("new value not returned by dynamodb").into()),
+        };
+        Ok(new_value.parse()?)
     }
 
     async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(

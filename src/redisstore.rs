@@ -135,6 +135,10 @@ impl super::Backend for Backend {
         Ok(self.get_connection().await?.smembers(key.into()).await?)
     }
 
+    async fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(&self, key: K, n: i64) -> Result<i64> {
+        Ok(self.get_connection().await?.incr(key.into(), n).await?)
+    }
+
     async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
         &self,
         key: K,

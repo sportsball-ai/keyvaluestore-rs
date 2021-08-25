@@ -79,6 +79,15 @@ impl super::Backend for Backend {
         }
     }
 
+    async fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(&self, key: K, n: i64) -> Result<i64> {
+        match self {
+            Self::Memory(backend) => backend.n_incr_by(key, n).await,
+            Self::Redis(backend) => backend.n_incr_by(key, n).await,
+            Self::DynamoDB(backend) => backend.n_incr_by(key, n).await,
+            Self::ReadCache(backend) => backend.n_incr_by(key, n).await,
+        }
+    }
+
     async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
         &self,
         key: K,

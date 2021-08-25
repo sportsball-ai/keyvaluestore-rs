@@ -68,6 +68,22 @@ impl Backend {
         Ok(())
     }
 
+    fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: K, n: i64) -> Result<i64> {
+        let key = key.into();
+        match m.get_mut(key.as_bytes()) {
+            Some(MapEntry::Value(v)) => {
+                let current: i64 = std::str::from_utf8(&v)?.parse()?;
+                let n = current + n;
+                *v = n.to_string().as_bytes().to_vec();
+                Ok(n)
+            }
+            _ => {
+                m.insert(key.into_vec(), MapEntry::Value(n.to_string().as_bytes().to_vec()));
+                Ok(n)
+            }
+        }
+    }
+
     fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
         m: &mut HashMap<Vec<u8>, MapEntry>,
         key: K,
@@ -263,6 +279,11 @@ impl super::Backend for Backend {
             Some(MapEntry::Set(s)) => s.iter().map(|v| v.clone().into()).collect(),
             _ => vec![],
         })
+    }
+
+    async fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(&self, key: K, n: i64) -> Result<i64> {
+        let mut m = self.m.lock().unwrap();
+        Self::n_incr_by(&mut m, key, n)
     }
 
     async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
