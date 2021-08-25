@@ -132,6 +132,13 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         }
     }
 
+    async fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(&self, key: K, n: i64) -> Result<i64> {
+        let key = key.into();
+        let r = self.inner.n_incr_by(&key, n).await;
+        self.invalidate(&key);
+        r
+    }
+
     async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
         &self,
         key: K,

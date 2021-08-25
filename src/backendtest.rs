@@ -68,6 +68,24 @@ macro_rules! test_backend {
 
         #[tokio::test]
         #[serial]
+        async fn test_n_incr_by() {
+            let b = ($f)().await;
+
+            let n = b.n_incr_by("foo", 2).await.unwrap();
+            assert_eq!(2, n);
+
+            let v = b.n_incr_by("foo", 0).await.unwrap();
+            assert_eq!(2, v);
+
+            let n = b.n_incr_by("foo", -1).await.unwrap();
+            assert_eq!(1, n);
+
+            let v = b.n_incr_by("foo", 0).await.unwrap();
+            assert_eq!(1, v);
+        }
+
+        #[tokio::test]
+        #[serial]
         async fn test_h_get() {
             let b = ($f)().await;
 
