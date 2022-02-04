@@ -475,6 +475,16 @@ impl super::Backend for Backend {
         for subop in &op.ops {
             if let Some(failure_tx) = match subop {
                 AtomicWriteSubOperation::Set(..) => None,
+                AtomicWriteSubOperation::SetEQ(key, _, old_value, tx) => match m.get(key.as_bytes()) {
+                    Some(MapEntry::Value(v)) => {
+                        if *v == old_value.as_bytes() {
+                            None
+                        } else {
+                            Some(tx)
+                        }
+                    }
+                    _ => Some(tx),
+                },
                 AtomicWriteSubOperation::SetNX(key, _, tx) => {
                     if m.contains_key(key.as_bytes()) {
                         Some(tx)
@@ -518,6 +528,9 @@ impl super::Backend for Backend {
         for subop in op.ops {
             match subop {
                 AtomicWriteSubOperation::Set(key, value) => {
+                    Self::set(&mut m, key, value);
+                }
+                AtomicWriteSubOperation::SetEQ(key, value, _, _) => {
                     Self::set(&mut m, key, value);
                 }
                 AtomicWriteSubOperation::SetNX(key, value, _) => {

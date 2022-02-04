@@ -328,6 +328,13 @@ impl super::Backend for Backend {
                     args: vec![value],
                     failure_tx: None,
                 },
+                AtomicWriteSubOperation::SetEQ(key, value, old_value, tx) => SubOp {
+                    keys: vec![key],
+                    condition: "redis.call('get', @0) == $1",
+                    write: "redis.call('set', @0, $0)".to_string(),
+                    args: vec![value, old_value],
+                    failure_tx: Some(tx),
+                },
                 AtomicWriteSubOperation::SetNX(key, value, tx) => SubOp {
                     keys: vec![key],
                     condition: "redis.call('exists', @0) == 0",
