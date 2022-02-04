@@ -291,6 +291,7 @@ impl ConditionalResult {
 
 pub enum AtomicWriteSubOperation<'a> {
     Set(Arg<'a>, Arg<'a>),
+    SetEQ(Arg<'a>, Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
     SetNX(Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
     ZAdd(Arg<'a>, Arg<'a>, f64),
     ZHAdd(Arg<'a>, Arg<'a>, Arg<'a>, f64),
@@ -320,6 +321,17 @@ impl<'a> AtomicWriteOperation<'a> {
 
     pub fn set<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
         self.ops.push(AtomicWriteSubOperation::Set(key.into(), value.into()));
+    }
+
+    pub fn set_eq<'k: 'a, 'v: 'a, 'ov: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send, OV: Into<Arg<'ov>> + Send>(
+        &mut self,
+        key: K,
+        value: V,
+        old_value: OV,
+    ) -> ConditionalResult {
+        let (ret, tx) = ConditionalResult::new();
+        self.ops.push(AtomicWriteSubOperation::SetEQ(key.into(), value.into(), old_value.into(), tx));
+        ret
     }
 
     pub fn set_nx<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) -> ConditionalResult {

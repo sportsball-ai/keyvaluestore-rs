@@ -322,6 +322,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
             keys.push(
                 match subop {
                     AtomicWriteSubOperation::Set(key, _) => key,
+                    AtomicWriteSubOperation::SetEQ(key, _, _, _) => key,
                     AtomicWriteSubOperation::SetNX(key, _, _) => key,
                     AtomicWriteSubOperation::Delete(key) => key,
                     AtomicWriteSubOperation::DeleteXX(key, _) => key,

@@ -617,6 +617,16 @@ impl super::Backend for Backend {
                     item.put = Some(put);
                     (item, None)
                 }
+                AtomicWriteSubOperation::SetEQ(key, value, old_value, tx) => {
+                    let mut put = Put::default();
+                    put.table_name = self.table_name.clone();
+                    put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
+                    put.condition_expression = Some("v = :v".to_string());
+                    put.expression_attribute_values = Some(vec![(":v".to_string(), attribute_value(old_value))].into_iter().collect());
+                    let mut item = TransactWriteItem::default();
+                    item.put = Some(put);
+                    (item, Some(tx))
+                }
                 AtomicWriteSubOperation::SetNX(key, value, tx) => {
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();

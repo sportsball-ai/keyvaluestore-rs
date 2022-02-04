@@ -464,6 +464,34 @@ macro_rules! test_backend {
 
         #[tokio::test]
         #[serial]
+        async fn test_atomic_write_set_eq() {
+            let b = ($f)().await;
+
+            let mut tx = AtomicWriteOperation::new();
+            let c = tx.set_eq("foo", "baz", "bar");
+            assert!(!b.exec_atomic_write(tx).await.unwrap());
+            assert!(c.failed());
+
+            b.set("foo", "bar").await.unwrap();
+
+            let mut tx = AtomicWriteOperation::new();
+            let c = tx.set_eq("foo", "baz", "asdf");
+            assert!(!b.exec_atomic_write(tx).await.unwrap());
+            assert!(c.failed());
+
+            let mut tx = AtomicWriteOperation::new();
+            let c = tx.set_eq("foo", "baz", "bar");
+            assert!(b.exec_atomic_write(tx).await.unwrap());
+            assert!(!c.failed());
+
+            let mut tx = AtomicWriteOperation::new();
+            let c = tx.set_eq("foo", "baz", "baz");
+            assert!(b.exec_atomic_write(tx).await.unwrap());
+            assert!(!c.failed());
+        }
+
+        #[tokio::test]
+        #[serial]
         async fn test_atomic_write_set_nx() {
             let b = ($f)().await;
 
