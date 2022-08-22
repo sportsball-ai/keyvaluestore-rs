@@ -1,7 +1,7 @@
 version: '3'
 services:
   dev:
-    image: rust:1.53
+    image: rust:1.62
     environment:
       DYNAMODB_ENDPOINT: http://dynamodb.local:8000
       REDIS_ADDRESS: redis.local:6379

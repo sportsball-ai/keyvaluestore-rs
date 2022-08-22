@@ -359,6 +359,23 @@ macro_rules! test_backend {
 
         #[tokio::test]
         #[serial]
+        async fn test_zh_rem() {
+            let b = ($f)().await;
+
+            b.zh_add("foo", "f", "foo", 1.0).await.unwrap();
+            b.zh_add("foo", "b", "bar", 2.0).await.unwrap();
+
+            let members = b.zh_range_by_score("foo", 0.0, 10.0, 0).await.unwrap();
+            assert_eq!(vec!["foo", "bar"], members);
+
+            b.zh_rem("foo", "b").await.unwrap();
+
+            let members = b.zh_range_by_score("foo", 0.0, 10.0, 0).await.unwrap();
+            assert_eq!(vec!["foo"], members);
+        }
+
+        #[tokio::test]
+        #[serial]
         async fn test_z_count() {
             let b = ($f)().await;
 
