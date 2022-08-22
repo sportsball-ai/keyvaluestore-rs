@@ -336,9 +336,13 @@ impl super::Backend for Backend {
         Self::zh_add(&mut m, key, field, value, score)
     }
 
-    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+    async fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
         let mut m = self.m.lock().unwrap();
-        Self::zh_rem(&mut m, key, value)
+        Self::zh_rem(&mut m, key, field)
+    }
+
+    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        self.zh_rem(key, value).await
     }
 
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {

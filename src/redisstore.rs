@@ -186,6 +186,20 @@ impl super::Backend for Backend {
         Ok(())
     }
 
+    async fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
+        let key = key.into();
+        let field = field.into();
+        let mut conn = self.get_connection().await?;
+        redis::pipe()
+            .atomic()
+            .zrem(&key, &field)
+            .hdel([ZH_HASH_KEY_PREFIX.as_bytes(), key.as_bytes()].concat(), &field)
+            .ignore()
+            .query_async::<_, Option<()>>(&mut conn)
+            .await?;
+        Ok(())
+    }
+
     async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         Ok(self.get_connection().await?.zrem(key.into(), value.into()).await?)
     }

@@ -215,6 +215,15 @@ impl super::Backend for Backend {
         }
     }
 
+    async fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
+        match self {
+            Self::Memory(backend) => backend.zh_rem(key, field).await,
+            Self::Redis(backend) => backend.zh_rem(key, field).await,
+            Self::DynamoDB(backend) => backend.zh_rem(key, field).await,
+            Self::ReadCache(backend) => backend.zh_rem(key, field).await,
+        }
+    }
+
     async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,

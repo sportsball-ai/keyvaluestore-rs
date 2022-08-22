@@ -250,6 +250,13 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         self.inner.zh_rev_range_by_score(key, min, max, limit).await
     }
 
+    async fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
+        let key = key.into();
+        let r = self.inner.zh_rem(&key, field).await;
+        self.invalidate(&key);
+        r
+    }
+
     async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,

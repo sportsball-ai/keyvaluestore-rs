@@ -454,12 +454,16 @@ impl super::Backend for Backend {
         Ok(())
     }
 
-    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+    async fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
         let mut delete = rusoto_dynamodb::DeleteItemInput::default();
         delete.table_name = self.table_name.clone();
-        delete.key = composite_key(key, value);
+        delete.key = composite_key(key, field);
         self.client.delete_item(delete).await?;
         Ok(())
+    }
+
+    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        self.zh_rem(key, value).await
     }
 
     async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
