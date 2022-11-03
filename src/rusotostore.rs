@@ -888,7 +888,7 @@ fn create_default_table_impl<'f>(
 #[cfg(test)]
 mod test {
     mod backend {
-        use crate::{dynamodbstore, test_backend};
+        use crate::{rusotostore, test_backend};
         use rusoto_core::{region::Region, request::HttpClient, RusotoError};
         use rusoto_credential::StaticProvider;
         use rusoto_dynamodb::{DescribeTableError, DynamoDb, DynamoDbClient};
@@ -927,9 +927,9 @@ mod test {
                 }
             }
 
-            dynamodbstore::create_default_table(&client, &table_name).await.expect("failed to create table");
+            rusotostore::create_default_table(&client, &table_name).await.expect("failed to create table");
 
-            dynamodbstore::Backend {
+            rusotostore::Backend {
                 allow_eventually_consistent_reads: false,
                 client,
                 table_name: table_name.clone(),
