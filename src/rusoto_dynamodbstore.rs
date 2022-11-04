@@ -1,10 +1,8 @@
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Bound, Error, Result, Value};
-use core::{future::Future, pin::Pin};
 use rand::RngCore;
 use rusoto_core::RusotoError;
 use rusoto_dynamodb::{
-    AttributeDefinition, AttributeValue, Delete, DynamoDb, DynamoDbClient, KeySchemaElement, LocalSecondaryIndex, Projection, ProvisionedThroughput, Put,
-    TransactWriteItem, Update,
+    AttributeDefinition, AttributeValue, Delete, DynamoDb, DynamoDbClient, KeySchemaElement, LocalSecondaryIndex, Projection, Put, TransactWriteItem, Update,
 };
 use simple_error::SimpleError;
 use std::{collections::HashMap, sync::mpsc};
@@ -810,14 +808,6 @@ impl super::Backend for Backend {
 }
 
 pub async fn create_default_table(client: &DynamoDbClient, table_name: &str) -> Result<()> {
-    create_default_table_impl(client, table_name, true).await
-}
-
-fn create_default_table_impl<'f>(
-    client: &'f DynamoDbClient,
-    table_name: &'f str,
-    try_pay_per_request: bool,
-) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'f>> {
     let mut create = rusoto_dynamodb::CreateTableInput::default();
     create.attribute_definitions = vec![
         AttributeDefinition {
@@ -861,28 +851,9 @@ fn create_default_table_impl<'f>(
         },
     }]);
     create.table_name = table_name.to_string();
-    if try_pay_per_request {
-        create.billing_mode = Some("PAY_PER_REQUEST".to_string());
-    } else {
-        // DynamoDB local doesn't support pay-per-request billing mode.
-        create.provisioned_throughput = Some(ProvisionedThroughput {
-            read_capacity_units: 5,
-            write_capacity_units: 5,
-        });
-    }
-    Box::pin(async move {
-        match client.create_table(create).await {
-            Ok(_) => Ok(()),
-            Err(e @ RusotoError::Validation(_)) => {
-                if try_pay_per_request {
-                    create_default_table_impl(client, table_name, false).await
-                } else {
-                    Err(e.into())
-                }
-            }
-            Err(e) => Err(e.into()),
-        }
-    })
+    create.billing_mode = Some("PAY_PER_REQUEST".to_string());
+    client.create_table(create).await?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,0 +1,1025 @@
+use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Bound, Error, Result, Value};
+use aws_sdk_dynamodb::model::AttributeValue;
+use aws_sdk_dynamodb::{
+    client::Client,
+    error::{PutItemError, PutItemErrorKind, TransactWriteItemsError, TransactWriteItemsErrorKind},
+    model::{
+        AttributeDefinition, BillingMode, Delete, KeySchemaElement, KeyType, KeysAndAttributes, LocalSecondaryIndex, Projection, ProjectionType, Put,
+        ReturnValue, ScalarAttributeType, Select, TransactWriteItem, Update,
+    },
+    types::{Blob, SdkError},
+};
+use rand::RngCore;
+use simple_error::SimpleError;
+use std::{collections::HashMap, sync::mpsc};
+
+#[derive(Clone)]
+pub struct Backend {
+    pub allow_eventually_consistent_reads: bool,
+    pub client: Client,
+    pub table_name: String,
+}
+
+const NO_SORT_KEY: &str = "_";
+
+fn new_item<'h, 's, H: Into<Arg<'h>> + Send, S: Into<Arg<'s>> + Send, A: IntoIterator<Item = (&'static str, AttributeValue)>>(
+    hash: H,
+    sort: S,
+    attrs: A,
+) -> HashMap<String, AttributeValue> {
+    let mut ret: HashMap<_, _> = attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    ret.insert("hk".to_string(), attribute_value(hash));
+    ret.insert("rk".to_string(), attribute_value(sort));
+    ret
+}
+
+fn composite_key<'h, 's, H: Into<Arg<'h>> + Send, S: Into<Arg<'s>> + Send>(hash: H, sort: S) -> HashMap<String, AttributeValue> {
+    let mut ret = HashMap::new();
+    ret.insert("hk".to_string(), attribute_value(hash));
+    ret.insert("rk".to_string(), attribute_value(sort));
+    ret
+}
+
+fn attribute_value<'a, V: Into<Arg<'a>>>(v: V) -> AttributeValue {
+    AttributeValue::B(Blob::new(v.into().into_vec()))
+}
+
+fn float_sort_key(f: f64) -> [u8; 8] {
+    let mut n = f.to_bits();
+    if (n & (1 << 63)) != 0 {
+        n ^= 0xffffffffffffffff
+    } else {
+        n ^= 0x8000000000000000
+    }
+    n.to_be_bytes()
+}
+
+fn float_sort_key_after(f: f64) -> Option<[u8; 8]> {
+    let mut n = f.to_bits();
+    if (n & (1 << 63)) != 0 {
+        n ^= 0xffffffffffffffff
+    } else {
+        n ^= 0x8000000000000000
+    }
+    n += 1;
+    if n == 0 {
+        None
+    } else {
+        Some(n.to_be_bytes())
+    }
+}
+
+enum ArgBound<'a> {
+    Inclusive(Arg<'a>),
+    Unbounded,
+}
+
+impl<'a> ArgBound<'a> {
+    fn inclusive_from(arg: &'a Bound<Arg<'a>>) -> Self {
+        match arg {
+            Bound::Included(arg) => Self::Inclusive(arg.as_bytes().into()),
+            Bound::Excluded(arg) => Self::Inclusive(arg.as_bytes().into()),
+            Bound::Unbounded => Self::Unbounded,
+        }
+    }
+}
+
+impl<'a> Into<Bound<Arg<'a>>> for ArgBound<'a> {
+    fn into(self) -> Bound<Arg<'a>> {
+        match self {
+            Self::Inclusive(a) => Bound::Included(a),
+            Self::Unbounded => Bound::Unbounded,
+        }
+    }
+}
+
+fn query_condition<'k, K: Into<Arg<'k>>>(key: K, min: ArgBound<'_>, max: ArgBound<'_>, secondary_index: bool) -> (String, HashMap<String, AttributeValue>) {
+    let mut attribute_values = HashMap::new();
+    attribute_values.insert(":hash".to_string(), attribute_value(key));
+
+    if let ArgBound::Inclusive(min) = &min {
+        attribute_values.insert(":minSort".to_string(), attribute_value(min));
+    }
+
+    if let ArgBound::Inclusive(max) = &max {
+        attribute_values.insert(":maxSort".to_string(), attribute_value(max));
+    }
+
+    let range_key = match secondary_index {
+        false => "rk",
+        true => "rk2",
+    };
+
+    let condition = match (min, max) {
+        (ArgBound::Inclusive(_), ArgBound::Inclusive(_)) => format!("hk = :hash AND {} BETWEEN :minSort AND :maxSort", range_key),
+        (ArgBound::Inclusive(_), ArgBound::Unbounded) => format!("hk = :hash AND {} >= :minSort", range_key),
+        (ArgBound::Unbounded, ArgBound::Inclusive(_)) => format!("hk = :hash AND {} <= :maxSort", range_key),
+        (ArgBound::Unbounded, ArgBound::Unbounded) => "hk = :hash".to_string(),
+    };
+
+    (condition, attribute_values)
+}
+
+fn score_bounds(min: f64, max: f64) -> (ArgBound<'static>, ArgBound<'static>) {
+    let min = float_sort_key(min);
+    let max = float_sort_key_after(max);
+    (
+        ArgBound::Inclusive(min.to_vec().into()),
+        match &max {
+            Some(max) => ArgBound::Inclusive(max.to_vec().into()),
+            None => ArgBound::Unbounded,
+        },
+    )
+}
+
+fn map_bound<T, U, F: FnOnce(T) -> U>(b: Bound<T>, f: F) -> Bound<U> {
+    match b {
+        Bound::Included(v) => Bound::Included(f(v)),
+        Bound::Excluded(v) => Bound::Excluded(f(v)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+fn lex_bound<'a, T: Into<Arg<'a>>>(score: f64, b: Bound<T>) -> Bound<Vec<u8>> {
+    let prefix = float_sort_key(score);
+    map_bound(b, |v| [&prefix, v.into().as_bytes()].concat())
+}
+
+fn lex_bounds<'m, 'n, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(score: f64, min: Bound<M>, max: Bound<N>) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    (lex_bound(score, min), lex_bound(score, max))
+}
+
+fn encode_field_name(name: &[u8]) -> String {
+    "~".to_string() + &base64::encode_config(name, base64::URL_SAFE_NO_PAD)
+}
+
+fn decode_field_name(name: &String) -> Option<Vec<u8>> {
+    if name.starts_with('~') {
+        base64::decode_config(&name[1..], base64::URL_SAFE_NO_PAD).ok()
+    } else {
+        None
+    }
+}
+
+impl Backend {
+    async fn z_range_impl<'k, 'm, 'n, K: Into<Arg<'k>>, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+        reverse: bool,
+        secondary_index: bool,
+    ) -> Result<Vec<Value>> {
+        let min = map_bound(min, |v| v.into());
+        let max = map_bound(max, |v| v.into());
+
+        let inclusive_min = ArgBound::inclusive_from(&min);
+        let inclusive_max = ArgBound::inclusive_from(&max);
+
+        if let (ArgBound::Inclusive(min), ArgBound::Inclusive(max)) = (&inclusive_min, &inclusive_max) {
+            if min.as_bytes() > max.as_bytes() {
+                return Ok(vec![]);
+            }
+        }
+
+        let (condition, attribute_values) = query_condition(key, inclusive_min, inclusive_max, secondary_index);
+
+        let mut query = self
+            .client
+            .query()
+            .table_name(self.table_name.clone())
+            .consistent_read(!self.allow_eventually_consistent_reads)
+            .key_condition_expression(condition.clone())
+            .set_expression_attribute_values(Some(attribute_values.clone()))
+            .scan_index_forward(!reverse)
+            .set_index_name(if secondary_index { Some("rk2".to_string()) } else { None });
+
+        let mut members = vec![];
+
+        while limit == 0 || members.len() < limit {
+            let mut q = query.clone();
+            if limit > 0 {
+                q = q.limit((limit - members.len() + 1) as _);
+            }
+            let result = q.send().await?;
+            if let Some(mut items) = result.items {
+                let mut skip = 0;
+
+                // dynamodb can't express exclusive ranges so we did an inclusive query. that means
+                // we may need to skip the first or last result
+                if !items.is_empty() {
+                    if members.is_empty() {
+                        if let Bound::Excluded(excluded_key) = if reverse { &max } else { &min } {
+                            if let Some(first_item_key) = items[0].get(if secondary_index { "rk2" } else { "rk" }).and_then(|v| v.as_b().ok()) {
+                                if excluded_key.as_bytes() == first_item_key.as_ref() {
+                                    skip = 1;
+                                }
+                            }
+                        }
+                    }
+
+                    if result.last_evaluated_key.is_none() {
+                        if let Bound::Excluded(excluded_key) = if reverse { &min } else { &max } {
+                            if let Some(last_item_key) = items
+                                .last()
+                                .and_then(|item| item.get(if secondary_index { "rk2" } else { "rk" }).and_then(|v| v.as_b().ok()))
+                            {
+                                if excluded_key.as_bytes() == last_item_key.as_ref() {
+                                    items.pop();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                members.extend(items.into_iter().skip(skip).filter_map(|mut v| {
+                    v.remove("v").and_then(|v| match v {
+                        AttributeValue::B(blob) => Some(blob.into_inner().into()),
+                        _ => None,
+                    })
+                }));
+            }
+            match result.last_evaluated_key {
+                Some(key) => query = query.set_exclusive_start_key(Some(key)),
+                None => break,
+            }
+        }
+
+        while limit > 0 && members.len() > limit {
+            members.pop();
+        }
+        Ok(members)
+    }
+}
+
+#[async_trait]
+impl super::Backend for Backend {
+    async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>> {
+        let result = self
+            .client
+            .get_item()
+            .consistent_read(!self.allow_eventually_consistent_reads)
+            .set_key(Some(composite_key(key, NO_SORT_KEY)))
+            .table_name(self.table_name.clone())
+            .send()
+            .await?;
+        Ok(result.item.and_then(|mut item| item.remove("v")).and_then(|v| match v {
+            AttributeValue::B(b) => Some(b.into_inner().into()),
+            _ => None,
+        }))
+    }
+
+    async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        self.client
+            .put_item()
+            .table_name(self.table_name.clone())
+            .set_item(Some(new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    async fn set_eq<'a, 'b, 'c, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        value: V,
+        old_value: OV,
+    ) -> Result<bool> {
+        match self
+            .client
+            .put_item()
+            .table_name(self.table_name.clone())
+            .set_item(Some(new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+            .condition_expression("v = :v")
+            .expression_attribute_values(":v", attribute_value(old_value))
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(SdkError::ServiceError {
+                err: PutItemError {
+                    kind: PutItemErrorKind::ConditionalCheckFailedException(_),
+                    ..
+                },
+                ..
+            }) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
+        match self
+            .client
+            .put_item()
+            .table_name(self.table_name.clone())
+            .set_item(Some(new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+            .condition_expression("attribute_not_exists(v)")
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(SdkError::ServiceError {
+                err: PutItemError {
+                    kind: PutItemErrorKind::ConditionalCheckFailedException(_),
+                    ..
+                },
+                ..
+            }) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn delete<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<bool> {
+        let result = self
+            .client
+            .delete_item()
+            .table_name(self.table_name.clone())
+            .set_key(Some(composite_key(key, NO_SORT_KEY)))
+            .return_values(ReturnValue::AllOld)
+            .send()
+            .await?;
+        Ok(result.attributes.is_some())
+    }
+
+    async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        let value = value.into();
+        let v = AttributeValue::Bs(vec![Blob::new(value.into_vec())]);
+        self.client
+            .update_item()
+            .set_key(Some(composite_key(key, NO_SORT_KEY)))
+            .table_name(self.table_name.clone())
+            .update_expression("ADD v :v")
+            .expression_attribute_values(":v", v)
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    async fn s_members<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Vec<Value>> {
+        let result = self
+            .client
+            .get_item()
+            .consistent_read(!self.allow_eventually_consistent_reads)
+            .set_key(Some(composite_key(key, NO_SORT_KEY)))
+            .table_name(self.table_name.clone())
+            .send()
+            .await?;
+        Ok(result
+            .item
+            .and_then(|mut item| item.remove("v"))
+            .and_then(|v| match v {
+                AttributeValue::Bs(bs) => Some(bs.into_iter().map(|v| v.into_inner().into()).collect()),
+                _ => None,
+            })
+            .unwrap_or(vec![]))
+    }
+
+    async fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(&self, key: K, n: i64) -> Result<i64> {
+        let output = self
+            .client
+            .update_item()
+            .set_key(Some(composite_key(key, NO_SORT_KEY)))
+            .table_name(self.table_name.clone())
+            .update_expression("ADD v :n")
+            .expression_attribute_values(":n", AttributeValue::N(n.to_string()))
+            .return_values(ReturnValue::AllNew)
+            .send()
+            .await?;
+        let new_value = output
+            .attributes
+            .and_then(|mut h| h.remove("v"))
+            .and_then(|v| match v {
+                AttributeValue::N(n) => Some(n),
+                _ => None,
+            })
+            .ok_or_else(|| SimpleError::new("new value not returned by dynamodb"))?;
+        Ok(new_value.parse()?)
+    }
+
+    async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+        &self,
+        key: K,
+        fields: I,
+    ) -> Result<()> {
+        let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let v = AttributeValue::B(Blob::new(f.1.into().into_vec()));
+                ((format!("#n{}", i), encode_field_name(f.0.into().as_bytes())), (format!(":n{}", i), v))
+            })
+            .unzip();
+        self.client
+            .update_item()
+            .set_key(Some(composite_key(key, NO_SORT_KEY)))
+            .table_name(self.table_name.clone())
+            .update_expression(format!(
+                "SET {}",
+                (0..names.len()).map(|i| format!("#n{} = :n{}", i, i)).collect::<Vec<_>>().join(", ")
+            ))
+            .set_expression_attribute_values(Some(values))
+            .set_expression_attribute_names(Some(names))
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    async fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
+        let names: HashMap<_, _> = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| (format!("#n{}", i), encode_field_name(f.into().as_bytes())))
+            .collect();
+        self.client
+            .update_item()
+            .set_key(Some(composite_key(key, NO_SORT_KEY)))
+            .table_name(self.table_name.clone())
+            .update_expression(format!(
+                "REMOVE {}",
+                (0..names.len()).map(|i| format!("#n{}", i)).collect::<Vec<_>>().join(", ")
+            ))
+            .set_expression_attribute_names(Some(names))
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    async fn h_get<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
+        let result = self
+            .client
+            .get_item()
+            .consistent_read(!self.allow_eventually_consistent_reads)
+            .set_key(Some(composite_key(key, NO_SORT_KEY)))
+            .table_name(self.table_name.clone())
+            .send()
+            .await?;
+        Ok(result
+            .item
+            .and_then(|mut item| item.remove(&encode_field_name(field.into().as_bytes())))
+            .and_then(|v| match v {
+                AttributeValue::B(b) => Some(b.into_inner().into()),
+                _ => None,
+            }))
+    }
+
+    async fn h_get_all<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
+        let result = self
+            .client
+            .get_item()
+            .consistent_read(!self.allow_eventually_consistent_reads)
+            .set_key(Some(composite_key(key, NO_SORT_KEY)))
+            .table_name(self.table_name.clone())
+            .send()
+            .await?;
+        Ok(result
+            .item
+            .map(|item| {
+                item.into_iter()
+                    .filter_map(|(name, v)| {
+                        decode_field_name(&name).and_then(|name| match v {
+                            AttributeValue::B(b) => Some((name, b.into_inner().into())),
+                            _ => None,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or(HashMap::new()))
+    }
+
+    async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
+        let v = value.into();
+        self.zh_add(key, &v, &v, score).await
+    }
+
+    async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        field: F,
+        value: V,
+        score: f64,
+    ) -> Result<()> {
+        let field = field.into();
+        let value = value.into();
+        self.client
+            .put_item()
+            .table_name(self.table_name.clone())
+            .set_item(Some(new_item(
+                key,
+                &field,
+                vec![
+                    ("v", attribute_value(&value)),
+                    ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
+                ],
+            )))
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    async fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
+        self.client
+            .delete_item()
+            .table_name(self.table_name.clone())
+            .set_key(Some(composite_key(key, field)))
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        self.zh_rem(key, value).await
+    }
+
+    async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+        if min > max {
+            return Ok(0);
+        }
+
+        let (min, max) = score_bounds(min, max);
+        let (condition, attribute_values) = query_condition(key, min, max, true);
+
+        let mut query = self
+            .client
+            .query()
+            .table_name(self.table_name.clone())
+            .consistent_read(!self.allow_eventually_consistent_reads)
+            .key_condition_expression(condition.clone())
+            .set_expression_attribute_values(Some(attribute_values.clone()))
+            .index_name("rk2")
+            .select(Select::Count);
+
+        let mut count = 0;
+
+        loop {
+            let result = query.clone().send().await?;
+            count += result.count as usize;
+            match result.last_evaluated_key {
+                Some(key) => query = query.set_exclusive_start_key(Some(key)),
+                None => break,
+            }
+        }
+
+        Ok(count)
+    }
+
+    async fn zh_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+        self.z_count(key, min, max).await
+    }
+
+    async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        let (min, max) = score_bounds(min, max);
+        self.z_range_impl(key, min.into(), max.into(), limit, false, true).await
+    }
+
+    async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        self.z_range_by_score(key, min, max, limit).await
+    }
+
+    async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        let (min, max) = score_bounds(min, max);
+        self.z_range_impl(key, min.into(), max.into(), limit, true, true).await
+    }
+
+    async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+        self.z_rev_range_by_score(key, min, max, limit).await
+    }
+
+    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let (min, max) = lex_bounds(0.0, min, max);
+        self.z_range_impl(key, min, max, limit, false, true).await
+    }
+
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+        &self,
+        key: K,
+        min: Bound<M>,
+        max: Bound<N>,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let (min, max) = lex_bounds(0.0, min, max);
+        self.z_range_impl(key, min, max, limit, true, true).await
+    }
+
+    async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
+        if op.ops.is_empty() {
+            return Ok(());
+        }
+
+        let mut keys: Vec<_> = op
+            .ops
+            .iter()
+            .map(|op| match op {
+                BatchSubOperation::Get(key, _) => composite_key(key, NO_SORT_KEY),
+            })
+            .collect();
+
+        let txs: HashMap<&[u8], _> = op
+            .ops
+            .iter()
+            .map(|op| match op {
+                BatchSubOperation::Get(key, tx) => (key.as_bytes(), tx),
+            })
+            .collect();
+
+        const MAX_BATCH_SIZE: usize = 100;
+
+        while !keys.is_empty() {
+            let batch = keys.split_off(if keys.len() > MAX_BATCH_SIZE { keys.len() - MAX_BATCH_SIZE } else { 0 });
+            let keys_and_attributes = KeysAndAttributes::builder()
+                .consistent_read(!self.allow_eventually_consistent_reads)
+                .set_keys(Some(batch))
+                .build();
+            let result = self
+                .client
+                .batch_get_item()
+                .request_items(self.table_name.clone(), keys_and_attributes)
+                .send()
+                .await?;
+            if let Some(items) = result.responses.and_then(|mut r| r.remove(&self.table_name)) {
+                for mut item in items {
+                    if let Some(v) = item.remove("v").and_then(|v| match v {
+                        AttributeValue::B(b) => Some(b.into_inner().into()),
+                        _ => None,
+                    }) {
+                        match item
+                            .remove("hk")
+                            .and_then(|hk| match hk {
+                                AttributeValue::B(b) => txs.get(b.as_ref()),
+                                _ => None,
+                            })
+                            .map(|tx| tx.try_send(v))
+                        {
+                            Some(Ok(_)) => {}
+                            Some(Err(mpsc::TrySendError::Disconnected(_))) => {}
+                            Some(Err(e)) => return Err(e.into()),
+                            None => {}
+                        }
+                    }
+                }
+            }
+
+            if let Some(unprocessed) = result.unprocessed_keys.and_then(|mut k| k.remove(&self.table_name)).and_then(|kv| kv.keys) {
+                keys.extend(unprocessed);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {
+        let mut token = Vec::new();
+        token.resize(20, 0u8);
+        rand::thread_rng().fill_bytes(&mut token);
+        let token = base64::encode_config(token, base64::URL_SAFE_NO_PAD);
+
+        let (transact_items, failure_txs): (Vec<_>, Vec<_>) = op
+            .ops
+            .into_iter()
+            .map(|op| match op {
+                AtomicWriteSubOperation::Set(key, value) => {
+                    let item = TransactWriteItem::builder()
+                        .put(
+                            Put::builder()
+                                .table_name(self.table_name.clone())
+                                .set_item(Some(new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+                AtomicWriteSubOperation::SetEQ(key, value, old_value, tx) => {
+                    let item = TransactWriteItem::builder()
+                        .put(
+                            Put::builder()
+                                .table_name(self.table_name.clone())
+                                .set_item(Some(new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+                                .condition_expression("v = :v")
+                                .expression_attribute_values(":v", attribute_value(old_value))
+                                .build(),
+                        )
+                        .build();
+                    (item, Some(tx))
+                }
+                AtomicWriteSubOperation::SetNX(key, value, tx) => {
+                    let item = TransactWriteItem::builder()
+                        .put(
+                            Put::builder()
+                                .table_name(self.table_name.clone())
+                                .set_item(Some(new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+                                .condition_expression("attribute_not_exists(v)")
+                                .build(),
+                        )
+                        .build();
+                    (item, Some(tx))
+                }
+                AtomicWriteSubOperation::Delete(key) => {
+                    let item = TransactWriteItem::builder()
+                        .delete(
+                            Delete::builder()
+                                .table_name(self.table_name.clone())
+                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+                AtomicWriteSubOperation::DeleteXX(key, tx) => {
+                    let item = TransactWriteItem::builder()
+                        .delete(
+                            Delete::builder()
+                                .table_name(self.table_name.clone())
+                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .condition_expression("attribute_exists(v)")
+                                .build(),
+                        )
+                        .build();
+                    (item, Some(tx))
+                }
+                AtomicWriteSubOperation::SAdd(key, value) => {
+                    let v = AttributeValue::Bs(vec![Blob::new(value.into_vec())]);
+                    let item = TransactWriteItem::builder()
+                        .update(
+                            Update::builder()
+                                .table_name(self.table_name.clone())
+                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .update_expression("ADD v :v")
+                                .expression_attribute_values(":v", v)
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+                AtomicWriteSubOperation::SRem(key, value) => {
+                    let v = AttributeValue::Bs(vec![Blob::new(value.into_vec())]);
+                    let item = TransactWriteItem::builder()
+                        .update(
+                            Update::builder()
+                                .table_name(self.table_name.clone())
+                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .update_expression("DELETE v :v")
+                                .expression_attribute_values(":v", v)
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+                AtomicWriteSubOperation::ZAdd(key, value, score) => {
+                    let item = TransactWriteItem::builder()
+                        .put(
+                            Put::builder()
+                                .table_name(self.table_name.clone())
+                                .set_item(Some(new_item(
+                                    key,
+                                    &value,
+                                    vec![
+                                        ("v", attribute_value(&value)),
+                                        ("rk2", attribute_value(&[&float_sort_key(score), value.as_bytes()].concat())),
+                                    ],
+                                )))
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+                AtomicWriteSubOperation::ZHAdd(key, field, value, score) => {
+                    let item = TransactWriteItem::builder()
+                        .put(
+                            Put::builder()
+                                .table_name(self.table_name.clone())
+                                .set_item(Some(new_item(
+                                    key,
+                                    &field,
+                                    vec![
+                                        ("v", attribute_value(&value)),
+                                        ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
+                                    ],
+                                )))
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+                AtomicWriteSubOperation::ZRem(key, value) => {
+                    let item = TransactWriteItem::builder()
+                        .delete(
+                            Delete::builder()
+                                .table_name(self.table_name.clone())
+                                .set_key(Some(composite_key(key, value)))
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+                AtomicWriteSubOperation::ZHRem(key, field) => {
+                    let item = TransactWriteItem::builder()
+                        .delete(
+                            Delete::builder()
+                                .table_name(self.table_name.clone())
+                                .set_key(Some(composite_key(key, field)))
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+                AtomicWriteSubOperation::HSet(key, fields) => {
+                    let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, f)| {
+                            let v = AttributeValue::B(Blob::new(f.1.into_vec()));
+                            ((format!("#n{}", i), encode_field_name(f.0.as_bytes())), (format!(":n{}", i), v))
+                        })
+                        .unzip();
+                    let item = TransactWriteItem::builder()
+                        .update(
+                            Update::builder()
+                                .table_name(self.table_name.clone())
+                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .update_expression(format!(
+                                    "SET {}",
+                                    (0..names.len()).map(|i| format!("#n{} = :n{}", i, i)).collect::<Vec<_>>().join(", ")
+                                ))
+                                .set_expression_attribute_values(Some(values))
+                                .set_expression_attribute_names(Some(names))
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+                AtomicWriteSubOperation::HSetNX(key, field, value, tx) => {
+                    let v = AttributeValue::B(Blob::new(value.into_vec()));
+                    let item = TransactWriteItem::builder()
+                        .update(
+                            Update::builder()
+                                .table_name(self.table_name.clone())
+                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .condition_expression("attribute_not_exists(#f)")
+                                .update_expression("SET #f = :v")
+                                .expression_attribute_values(":v", v)
+                                .expression_attribute_names("#f", encode_field_name(field.as_bytes()))
+                                .build(),
+                        )
+                        .build();
+                    (item, Some(tx))
+                }
+                AtomicWriteSubOperation::HDel(key, fields) => {
+                    let names: HashMap<_, _> = fields
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, f)| (format!("#n{}", i), encode_field_name(f.as_bytes())))
+                        .collect();
+                    let item = TransactWriteItem::builder()
+                        .update(
+                            Update::builder()
+                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .table_name(self.table_name.clone())
+                                .update_expression(format!(
+                                    "REMOVE {}",
+                                    (0..names.len()).map(|i| format!("#n{}", i)).collect::<Vec<_>>().join(", ")
+                                ))
+                                .set_expression_attribute_names(Some(names))
+                                .build(),
+                        )
+                        .build();
+                    (item, None)
+                }
+            })
+            .unzip();
+        match self
+            .client
+            .transact_write_items()
+            .client_request_token(token)
+            .set_transact_items(Some(transact_items))
+            .send()
+            .await
+        {
+            Err(SdkError::ServiceError {
+                err:
+                    TransactWriteItemsError {
+                        kind: TransactWriteItemsErrorKind::TransactionCanceledException(cancel),
+                        ..
+                    },
+                ..
+            }) => {
+                let mut did_fail_conditional = false;
+                for (i, reason) in cancel.cancellation_reasons().unwrap_or(&[]).iter().enumerate() {
+                    if matches!(reason.code(), Some("ConditionalCheckFailed")) {
+                        did_fail_conditional = true;
+                        if let Some(Some(tx)) = failure_txs.get(i) {
+                            match tx.try_send(true) {
+                                Ok(_) => {}
+                                Err(mpsc::TrySendError::Disconnected(_)) => {}
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
+                    }
+                }
+                if did_fail_conditional {
+                    Ok(false)
+                } else {
+                    Err(Error::AtomicWriteConflict)
+                }
+            }
+            Err(e) => Err(e.into()),
+            Ok(_) => Ok(true),
+        }
+    }
+}
+
+pub async fn create_default_table(client: &Client, table_name: &str) -> Result<()> {
+    client
+        .create_table()
+        .set_attribute_definitions(Some(vec![
+            AttributeDefinition::builder()
+                .attribute_name("hk")
+                .attribute_type(ScalarAttributeType::B)
+                .build(),
+            AttributeDefinition::builder()
+                .attribute_name("rk")
+                .attribute_type(ScalarAttributeType::B)
+                .build(),
+            AttributeDefinition::builder()
+                .attribute_name("rk2")
+                .attribute_type(ScalarAttributeType::B)
+                .build(),
+        ]))
+        .set_key_schema(Some(vec![
+            KeySchemaElement::builder().attribute_name("hk").key_type(KeyType::Hash).build(),
+            KeySchemaElement::builder().attribute_name("rk").key_type(KeyType::Range).build(),
+        ]))
+        .local_secondary_indexes(
+            LocalSecondaryIndex::builder()
+                .index_name("rk2")
+                .set_key_schema(Some(vec![
+                    KeySchemaElement::builder().attribute_name("hk").key_type(KeyType::Hash).build(),
+                    KeySchemaElement::builder().attribute_name("rk2").key_type(KeyType::Range).build(),
+                ]))
+                .projection(Projection::builder().projection_type(ProjectionType::All).build())
+                .build(),
+        )
+        .table_name(table_name)
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    mod backend {
+        use crate::{aws_sdk_dynamodbstore, test_backend};
+        use aws_sdk_dynamodb::{
+            error::{DescribeTableError, DescribeTableErrorKind},
+            types::SdkError,
+            Client, Credentials, Endpoint, Region,
+        };
+        use tokio::time;
+
+        test_backend!(|| async {
+            // expects DynamoDB local to be running: docker run -p 8000:8000 --rm -it amazon/dynamodb-local
+            let endpoint = std::env::var("DYNAMODB_ENDPOINT").unwrap_or("http://localhost:8000".to_string());
+            let creds = Credentials::new("ACCESSKEYID", "SECRET", None, None, "dummy");
+            let config = aws_sdk_dynamodb::Config::builder()
+                .credentials_provider(creds)
+                .endpoint_resolver(Endpoint::immutable(endpoint.parse().expect("valid URI")))
+                .region(Region::from_static("test"))
+                .build();
+            let client = Client::from_conf(config);
+
+            let table_name = "BackendTest";
+
+            if let Ok(_) = client.delete_table().table_name(table_name).send().await {
+                for _ in 0..10u32 {
+                    match client.describe_table().table_name(table_name.clone()).send().await {
+                        Err(SdkError::ServiceError {
+                            err:
+                                DescribeTableError {
+                                    kind: DescribeTableErrorKind::ResourceNotFoundException(_),
+                                    ..
+                                },
+                            ..
+                        }) => break,
+                        _ => time::sleep(time::Duration::from_millis(200)).await,
+                    }
+                }
+            }
+
+            aws_sdk_dynamodbstore::create_default_table(&client, &table_name)
+                .await
+                .expect("failed to create table");
+
+            aws_sdk_dynamodbstore::Backend {
+                allow_eventually_consistent_reads: false,
+                client,
+                table_name: table_name.to_owned(),
+            }
+        });
+    }
+}

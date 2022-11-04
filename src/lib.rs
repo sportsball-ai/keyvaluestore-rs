@@ -9,6 +9,8 @@ use std::{collections::HashMap, convert::From, fmt, ops::Bound, sync::mpsc};
 
 pub mod backendtest;
 
+#[cfg(feature = "aws-sdk")]
+pub mod aws_sdk_dynamodbstore;
 pub mod dynstore;
 pub mod memorystore;
 pub mod readcache;

@@ -4,6 +4,8 @@ use std::{collections::HashMap, ops::Bound};
 #[derive(Clone)]
 #[non_exhaustive]
 pub enum Backend {
+    #[cfg(feature = "aws-sdk")]
+    AwsSdkDynamoDB(crate::aws_sdk_dynamodbstore::Backend),
     Memory(memorystore::Backend),
     #[cfg(feature = "redis")]
     Redis(crate::redisstore::Backend),
@@ -20,6 +22,8 @@ pub enum Backend {
 macro_rules! dispatch {
     ($self:ident, $backend:ident, { $expansion:expr }) => {
         match $self {
+            #[cfg(feature = "aws-sdk")]
+            Self::AwsSdkDynamoDB($backend) => $expansion,
             Self::Memory($backend) => $expansion,
             #[cfg(feature = "redis")]
             Self::Redis($backend) => $expansion,
