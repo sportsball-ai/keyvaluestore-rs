@@ -15,7 +15,7 @@ pub mod readcache;
 #[cfg(feature = "redis")]
 pub mod redisstore;
 #[cfg(feature = "rusoto")]
-pub mod rusotostore;
+pub mod rusoto_dynamodbstore;
 
 // re-export these crates since we use a fork
 // once this issue is resolved, we can delete the fork: https://github.com/rusoto/rusoto/issues/1774
