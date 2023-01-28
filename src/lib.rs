@@ -125,6 +125,12 @@ impl<'a> Into<Arg<'a>> for &'a String {
     }
 }
 
+impl std::fmt::Debug for Arg<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        std::fmt::Display::fmt(&self.as_bytes().escape_ascii(), f)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Eq)]
 pub struct Value(Vec<u8>);
 

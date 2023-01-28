@@ -2,10 +2,15 @@ use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, 
 use rand::RngCore;
 use rusoto_core::RusotoError;
 use rusoto_dynamodb::{
-    AttributeDefinition, AttributeValue, Delete, DynamoDb, DynamoDbClient, KeySchemaElement, LocalSecondaryIndex, Projection, Put, TransactWriteItem, Update,
+    AttributeDefinition, AttributeValue, ConsumedCapacity, Delete, DynamoDb, DynamoDbClient, KeySchemaElement, LocalSecondaryIndex, Projection, Put,
+    TransactWriteItem, Update,
 };
 use simple_error::SimpleError;
-use std::{collections::HashMap, sync::mpsc};
+use std::{
+    collections::HashMap,
+    sync::mpsc::{self, SyncSender},
+};
+use tracing::{field::Empty, info_span, Span};
 
 #[derive(Clone)]
 pub struct Backend {
@@ -540,6 +545,7 @@ impl super::Backend for Backend {
         self.z_range_impl(key, min, max, limit, true, true).await
     }
 
+    #[tracing::instrument(skip_all, fields(error, consumed_rcu))]
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
         if op.ops.is_empty() {
             return Ok(());
@@ -553,16 +559,25 @@ impl super::Backend for Backend {
             })
             .collect();
 
-        let txs: HashMap<&[u8], _> = op
+        struct Op<'a> {
+            tx: &'a mpsc::SyncSender<Value>,
+            _span: Span,
+        }
+
+        let mut ops: HashMap<&[u8], Op> = op
             .ops
             .iter()
             .map(|op| match op {
-                BatchSubOperation::Get(key, tx) => (key.as_bytes(), tx),
+                BatchSubOperation::Get(key, tx) => {
+                    let span = info_span!("get", ?key);
+                    (key.as_bytes(), Op { tx, _span: span })
+                }
             })
             .collect();
 
         const MAX_BATCH_SIZE: usize = 100;
 
+        let mut cap = TotalConsumedCapacity::default();
         while !keys.is_empty() {
             let batch = keys.split_off(if keys.len() > MAX_BATCH_SIZE { keys.len() - MAX_BATCH_SIZE } else { 0 });
             let mut get = rusoto_dynamodb::BatchGetItemInput::default();
@@ -570,8 +585,15 @@ impl super::Backend for Backend {
             keys_and_attributes.consistent_read = Some(!self.allow_eventually_consistent_reads);
             keys_and_attributes.keys = batch;
             get.request_items.insert(self.table_name.clone(), keys_and_attributes);
-
-            let result = self.client.batch_get_item(get).await?;
+            get.return_consumed_capacity = Some("TOTAL".to_owned());
+            let result = match self.client.batch_get_item(get).await {
+                Err(e) => {
+                    Span::current().record("error", &e as &(dyn std::error::Error + Send + 'static));
+                    return Err(e.into());
+                }
+                Ok(r) => r,
+            };
+            cap.add(result.consumed_capacity);
 
             if let Some(items) = result.responses.and_then(|mut r| r.remove(&self.table_name)) {
                 for mut item in items {
@@ -579,12 +601,15 @@ impl super::Backend for Backend {
                         match item
                             .remove("hk")
                             .and_then(|hk| hk.b)
-                            .and_then(|b| txs.get(&b as &[u8]))
-                            .map(|tx| tx.try_send(v))
+                            .and_then(|b| ops.remove(&b as &[u8]))
+                            .map(|op| op.tx.try_send(v))
                         {
                             Some(Ok(_)) => {}
                             Some(Err(mpsc::TrySendError::Disconnected(_))) => {}
-                            Some(Err(e)) => return Err(e.into()),
+                            Some(Err(e)) => {
+                                Span::current().record("error", &e as &(dyn std::error::Error + Send + 'static));
+                                return Err(e.into());
+                            }
                             None => {}
                         }
                     }
@@ -595,31 +620,41 @@ impl super::Backend for Backend {
                 keys.extend(unprocessed.keys);
             }
         }
+        cap.record_to(&Span::current());
 
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(error, consumed_wcu))]
     async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {
         let mut token = Vec::new();
         token.resize(20, 0u8);
         rand::thread_rng().fill_bytes(&mut token);
         let token = base64::encode_config(token, base64::URL_SAFE_NO_PAD);
 
+        struct SubOpState {
+            failure_tx: Option<SyncSender<bool>>,
+            span: Span,
+        }
+
         let mut tx = rusoto_dynamodb::TransactWriteItemsInput::default();
         tx.client_request_token = Some(token);
-        let (transact_items, failure_txs): (Vec<_>, Vec<_>) = op
+        tx.return_consumed_capacity = Some("TOTAL".to_owned());
+        let (transact_items, states): (Vec<_>, Vec<_>) = op
             .ops
             .into_iter()
             .map(|op| match op {
                 AtomicWriteSubOperation::Set(key, value) => {
+                    let span = info_span!("set", ?key);
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
                     let mut item = TransactWriteItem::default();
                     item.put = Some(put);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
                 AtomicWriteSubOperation::SetEQ(key, value, old_value, tx) => {
+                    let span = info_span!("set_eq", ?key, condition_failure = Empty);
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
@@ -627,35 +662,39 @@ impl super::Backend for Backend {
                     put.expression_attribute_values = Some(vec![(":v".to_string(), attribute_value(old_value))].into_iter().collect());
                     let mut item = TransactWriteItem::default();
                     item.put = Some(put);
-                    (item, Some(tx))
+                    (item, SubOpState { failure_tx: Some(tx), span })
                 }
                 AtomicWriteSubOperation::SetNX(key, value, tx) => {
+                    let span = info_span!("set_nx", ?key, condition_failure = Empty);
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
                     put.condition_expression = Some("attribute_not_exists(v)".to_string());
                     let mut item = TransactWriteItem::default();
                     item.put = Some(put);
-                    (item, Some(tx))
+                    (item, SubOpState { failure_tx: Some(tx), span })
                 }
                 AtomicWriteSubOperation::Delete(key) => {
+                    let span = info_span!("delete", ?key);
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(key, NO_SORT_KEY);
                     let mut item = TransactWriteItem::default();
                     item.delete = Some(delete);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
                 AtomicWriteSubOperation::DeleteXX(key, tx) => {
+                    let span = info_span!("delete_xx", ?key, condition_failure = Empty);
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(key, NO_SORT_KEY);
                     delete.condition_expression = Some("attribute_exists(v)".to_string());
                     let mut item = TransactWriteItem::default();
                     item.delete = Some(delete);
-                    (item, Some(tx))
+                    (item, SubOpState { failure_tx: Some(tx), span })
                 }
                 AtomicWriteSubOperation::SAdd(key, value) => {
+                    let span = info_span!("s_add", ?key);
                     let mut v = AttributeValue::default();
                     v.bs = Some(vec![bytes::Bytes::copy_from_slice(value.as_bytes())]);
                     let mut update = Update::default();
@@ -665,9 +704,10 @@ impl super::Backend for Backend {
                     update.expression_attribute_values = Some(vec![(":v".to_string(), v)].into_iter().collect());
                     let mut item = TransactWriteItem::default();
                     item.update = Some(update);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
                 AtomicWriteSubOperation::SRem(key, value) => {
+                    let span = info_span!("s_rem", ?key);
                     let mut v = AttributeValue::default();
                     v.bs = Some(vec![bytes::Bytes::copy_from_slice(value.as_bytes())]);
                     let mut update = Update::default();
@@ -677,9 +717,10 @@ impl super::Backend for Backend {
                     update.expression_attribute_values = Some(vec![(":v".to_string(), v)].into_iter().collect());
                     let mut item = TransactWriteItem::default();
                     item.update = Some(update);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
                 AtomicWriteSubOperation::ZAdd(key, value, score) => {
+                    let span = info_span!("z_add", ?key);
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(
@@ -692,9 +733,10 @@ impl super::Backend for Backend {
                     );
                     let mut item = TransactWriteItem::default();
                     item.put = Some(put);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
                 AtomicWriteSubOperation::ZHAdd(key, field, value, score) => {
+                    let span = info_span!("zh_add", ?key);
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(
@@ -707,25 +749,28 @@ impl super::Backend for Backend {
                     );
                     let mut item = TransactWriteItem::default();
                     item.put = Some(put);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
                 AtomicWriteSubOperation::ZRem(key, value) => {
+                    let span = info_span!("z_rem", ?key);
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(key, value);
                     let mut item = TransactWriteItem::default();
                     item.delete = Some(delete);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
                 AtomicWriteSubOperation::ZHRem(key, field) => {
+                    let span = info_span!("zh_rem", ?key);
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(key, field);
                     let mut item = TransactWriteItem::default();
                     item.delete = Some(delete);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
                 AtomicWriteSubOperation::HSet(key, fields) => {
+                    let span = info_span!("h_set", ?key);
                     let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
                         .into_iter()
                         .enumerate()
@@ -743,9 +788,10 @@ impl super::Backend for Backend {
                     update.expression_attribute_names = Some(names);
                     let mut item = TransactWriteItem::default();
                     item.update = Some(update);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
                 AtomicWriteSubOperation::HSetNX(key, field, value, tx) => {
+                    let span = info_span!("h_set_nx", ?key, condition_failure = Empty);
                     let mut update = Update::default();
                     update.table_name = self.table_name.clone();
                     update.key = composite_key(key, NO_SORT_KEY);
@@ -757,9 +803,10 @@ impl super::Backend for Backend {
                     update.expression_attribute_names = Some(vec![("#f".to_string(), encode_field_name(field.as_bytes()))].into_iter().collect());
                     let mut item = TransactWriteItem::default();
                     item.update = Some(update);
-                    (item, Some(tx))
+                    (item, SubOpState { failure_tx: Some(tx), span })
                 }
                 AtomicWriteSubOperation::HDel(key, fields) => {
+                    let span = info_span!("h_del", ?key);
                     let names: HashMap<_, _> = fields
                         .into_iter()
                         .enumerate()
@@ -772,7 +819,7 @@ impl super::Backend for Backend {
                     update.expression_attribute_names = Some(names);
                     let mut item = TransactWriteItem::default();
                     item.update = Some(update);
-                    (item, None)
+                    (item, SubOpState { failure_tx: None, span })
                 }
             })
             .unzip();
@@ -785,11 +832,16 @@ impl super::Backend for Backend {
                     if let Some(code) = &reason.code {
                         if code == "ConditionalCheckFailed" {
                             did_fail_conditional = true;
-                            if let Some(Some(tx)) = failure_txs.get(i) {
+                            let state = &states[i];
+                            state.span.record("condition_failure", true);
+                            if let Some(ref tx) = state.failure_tx {
                                 match tx.try_send(true) {
                                     Ok(_) => {}
                                     Err(mpsc::TrySendError::Disconnected(_)) => {}
-                                    Err(e) => return Err(e.into()),
+                                    Err(e) => {
+                                        tracing::Span::current().record("error", &e as &(dyn std::error::Error + Sync + 'static));
+                                        return Err(e.into());
+                                    }
                                 }
                             }
                         }
@@ -798,11 +850,50 @@ impl super::Backend for Backend {
                 if did_fail_conditional {
                     Ok(false)
                 } else {
+                    tracing::Span::current().record("error", "atomic write conflict");
                     Err(Error::AtomicWriteConflict)
                 }
             }
-            Err(e) => Err(e.into()),
-            Ok(_) => Ok(true),
+            Err(e) => {
+                tracing::Span::current().record("error", &e as &(dyn std::error::Error + Sync + 'static));
+                Err(e.into())
+            }
+            Ok(r) => {
+                let mut cap = TotalConsumedCapacity::default();
+                cap.add(r.consumed_capacity);
+                cap.record_to(&Span::current());
+                Ok(true)
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct TotalConsumedCapacity {
+    total_rcu: Option<f64>,
+    total_wcu: Option<f64>,
+}
+
+impl TotalConsumedCapacity {
+    fn add(&mut self, capacity: Option<Vec<ConsumedCapacity>>) {
+        for c in capacity.as_deref().unwrap_or(&[]) {
+            if let Some(rcu) = c.read_capacity_units {
+                *self.total_rcu.get_or_insert(0.) += rcu;
+            }
+            if let Some(wcu) = c.write_capacity_units {
+                *self.total_wcu.get_or_insert(0.) += wcu;
+            }
+        }
+    }
+
+    /// Records to the given span, which must already have empty `consumed_rcu` and `consumed_wcu`
+    /// attributes or recording those will do nothing.
+    fn record_to(&self, span: &Span) {
+        if let Some(rcu) = self.total_rcu {
+            span.record("consumed_rcu", rcu);
+        }
+        if let Some(wcu) = self.total_wcu {
+            span.record("consumed_wcu", wcu);
         }
     }
 }
