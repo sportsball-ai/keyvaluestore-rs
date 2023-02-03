@@ -7,7 +7,7 @@ use aws_sdk_dynamodb::{
         AttributeDefinition, BillingMode, Delete, KeySchemaElement, KeyType, KeysAndAttributes, LocalSecondaryIndex, Projection, ProjectionType, Put,
         ReturnValue, ScalarAttributeType, Select, TransactWriteItem, Update,
     },
-    types::{Blob, SdkError},
+    types::Blob,
 };
 use rand::RngCore;
 use simple_error::SimpleError;
@@ -295,13 +295,11 @@ impl super::Backend for Backend {
             .expression_attribute_values(":v", attribute_value(old_value))
             .send()
             .await
+            .map_err(|e| e.into_service_error())
         {
             Ok(_) => Ok(true),
-            Err(SdkError::ServiceError {
-                err: PutItemError {
-                    kind: PutItemErrorKind::ConditionalCheckFailedException(_),
-                    ..
-                },
+            Err(PutItemError {
+                kind: PutItemErrorKind::ConditionalCheckFailedException(_),
                 ..
             }) => Ok(false),
             Err(e) => Err(e.into()),
@@ -317,13 +315,11 @@ impl super::Backend for Backend {
             .condition_expression("attribute_not_exists(v)")
             .send()
             .await
+            .map_err(|e| e.into_service_error())
         {
             Ok(_) => Ok(true),
-            Err(SdkError::ServiceError {
-                err: PutItemError {
-                    kind: PutItemErrorKind::ConditionalCheckFailedException(_),
-                    ..
-                },
+            Err(PutItemError {
+                kind: PutItemErrorKind::ConditionalCheckFailedException(_),
                 ..
             }) => Ok(false),
             Err(e) => Err(e.into()),
@@ -899,13 +895,10 @@ impl super::Backend for Backend {
             .set_transact_items(Some(transact_items))
             .send()
             .await
+            .map_err(|e| e.into_service_error())
         {
-            Err(SdkError::ServiceError {
-                err:
-                    TransactWriteItemsError {
-                        kind: TransactWriteItemsErrorKind::TransactionCanceledException(cancel),
-                        ..
-                    },
+            Err(TransactWriteItemsError {
+                kind: TransactWriteItemsErrorKind::TransactionCanceledException(cancel),
                 ..
             }) => {
                 let mut did_fail_conditional = false;
@@ -977,8 +970,7 @@ mod test {
         use crate::{aws_sdk_dynamodbstore, test_backend};
         use aws_sdk_dynamodb::{
             error::{DescribeTableError, DescribeTableErrorKind},
-            types::SdkError,
-            Client, Credentials, Endpoint, Region,
+            Client, Credentials, Region,
         };
         use tokio::time;
 
@@ -988,7 +980,7 @@ mod test {
             let creds = Credentials::new("ACCESSKEYID", "SECRET", None, None, "dummy");
             let config = aws_sdk_dynamodb::Config::builder()
                 .credentials_provider(creds)
-                .endpoint_resolver(Endpoint::immutable(endpoint.parse().expect("valid URI")))
+                .endpoint_url(endpoint)
                 .region(Region::from_static("test"))
                 .build();
             let client = Client::from_conf(config);
@@ -997,13 +989,15 @@ mod test {
 
             if let Ok(_) = client.delete_table().table_name(table_name).send().await {
                 for _ in 0..10u32 {
-                    match client.describe_table().table_name(table_name.clone()).send().await {
-                        Err(SdkError::ServiceError {
-                            err:
-                                DescribeTableError {
-                                    kind: DescribeTableErrorKind::ResourceNotFoundException(_),
-                                    ..
-                                },
+                    match client
+                        .describe_table()
+                        .table_name(table_name.clone())
+                        .send()
+                        .await
+                        .map_err(|e| e.into_service_error())
+                    {
+                        Err(DescribeTableError {
+                            kind: DescribeTableErrorKind::ResourceNotFoundException(_),
                             ..
                         }) => break,
                         _ => time::sleep(time::Duration::from_millis(200)).await,
