@@ -1,3 +1,5 @@
+use crate::{ExplicitKey, Key};
+
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Bound, Error, Result, Value};
 use rand::RngCore;
 use rusoto_core::RusotoError;
@@ -21,20 +23,20 @@ pub struct Backend {
 
 const NO_SORT_KEY: &str = "_";
 
-fn new_item<'h, 's, H: Into<Arg<'h>> + Send, S: Into<Arg<'s>> + Send, A: IntoIterator<Item = (&'static str, AttributeValue)>>(
-    hash: H,
+fn new_item<'h, 's, S: Into<Arg<'s>> + Send, A: IntoIterator<Item = (&'static str, AttributeValue)>>(
+    hash: ExplicitKey<'h>,
     sort: S,
     attrs: A,
 ) -> HashMap<String, AttributeValue> {
     let mut ret: HashMap<_, _> = attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    ret.insert("hk".to_string(), attribute_value(hash));
+    ret.insert("hk".to_string(), attribute_value(hash.unredacted));
     ret.insert("rk".to_string(), attribute_value(sort));
     ret
 }
 
-fn composite_key<'h, 's, H: Into<Arg<'h>> + Send, S: Into<Arg<'s>> + Send>(hash: H, sort: S) -> HashMap<String, AttributeValue> {
+fn composite_key<'k, 's, S: Into<Arg<'s>> + Send>(hash: ExplicitKey<'k>, sort: S) -> HashMap<String, AttributeValue> {
     let mut ret = HashMap::new();
-    ret.insert("hk".to_string(), attribute_value(hash));
+    ret.insert("hk".to_string(), attribute_value(hash.unredacted));
     ret.insert("rk".to_string(), attribute_value(sort));
     ret
 }
@@ -95,9 +97,9 @@ impl<'a> Into<Bound<Arg<'a>>> for ArgBound<'a> {
     }
 }
 
-fn query_condition<'k, K: Into<Arg<'k>>>(key: K, min: ArgBound<'_>, max: ArgBound<'_>, secondary_index: bool) -> (String, HashMap<String, AttributeValue>) {
+fn query_condition<'k, K: Key<'k>>(key: K, min: ArgBound<'_>, max: ArgBound<'_>, secondary_index: bool) -> (String, HashMap<String, AttributeValue>) {
     let mut attribute_values = HashMap::new();
-    attribute_values.insert(":hash".to_string(), attribute_value(key));
+    attribute_values.insert(":hash".to_string(), attribute_value(key.into().unredacted));
 
     if let ArgBound::Inclusive(min) = &min {
         attribute_values.insert(":minSort".to_string(), attribute_value(min));
@@ -164,7 +166,7 @@ fn decode_field_name(name: &String) -> Option<Vec<u8>> {
 }
 
 impl Backend {
-    async fn z_range_impl<'k, 'm, 'n, K: Into<Arg<'k>>, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(
+    async fn z_range_impl<'k, 'm, 'n, K: Key<'k>, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(
         &self,
         key: K,
         min: Bound<M>,
@@ -255,32 +257,27 @@ impl Backend {
 
 #[async_trait]
 impl super::Backend for Backend {
-    async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>> {
+    async fn get<'a, K: Key<'a>>(&self, key: K) -> Result<Option<Value>> {
         let mut get = rusoto_dynamodb::GetItemInput::default();
         get.consistent_read = Some(!self.allow_eventually_consistent_reads);
-        get.key = composite_key(key, NO_SORT_KEY);
+        get.key = composite_key(key.into(), NO_SORT_KEY);
         get.table_name = self.table_name.clone();
         let result = self.client.get_item(get).await?;
         Ok(result.item.and_then(|mut item| item.remove("v")).and_then(|v| v.b).map(|v| v.to_vec().into()))
     }
 
-    async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+    async fn set<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let mut put = rusoto_dynamodb::PutItemInput::default();
         put.table_name = self.table_name.clone();
-        put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
+        put.item = new_item(key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))]);
         self.client.put_item(put).await?;
         Ok(())
     }
 
-    async fn set_eq<'a, 'b, 'c, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(
-        &self,
-        key: K,
-        value: V,
-        old_value: OV,
-    ) -> Result<bool> {
+    async fn set_eq<'a, 'b, 'c, K: Key<'a>, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(&self, key: K, value: V, old_value: OV) -> Result<bool> {
         let mut put = rusoto_dynamodb::PutItemInput::default();
         put.table_name = self.table_name.clone();
-        put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
+        put.item = new_item(key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))]);
         put.condition_expression = Some("v = :v".to_string());
         put.expression_attribute_values = Some(vec![(":v".to_string(), attribute_value(old_value))].into_iter().collect());
         match self.client.put_item(put).await {
@@ -290,10 +287,10 @@ impl super::Backend for Backend {
         }
     }
 
-    async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
+    async fn set_nx<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
         let mut put = rusoto_dynamodb::PutItemInput::default();
         put.table_name = self.table_name.clone();
-        put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
+        put.item = new_item(key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))]);
         put.condition_expression = Some("attribute_not_exists(v)".to_string());
         match self.client.put_item(put).await {
             Ok(_) => Ok(true),
@@ -302,21 +299,21 @@ impl super::Backend for Backend {
         }
     }
 
-    async fn delete<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<bool> {
+    async fn delete<'a, K: Key<'a>>(&self, key: K) -> Result<bool> {
         let mut delete = rusoto_dynamodb::DeleteItemInput::default();
         delete.table_name = self.table_name.clone();
-        delete.key = composite_key(key, NO_SORT_KEY);
+        delete.key = composite_key(key.into(), NO_SORT_KEY);
         delete.return_values = Some("ALL_OLD".to_string());
         let result = self.client.delete_item(delete).await?;
         Ok(result.attributes.is_some())
     }
 
-    async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+    async fn s_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let value = value.into();
         let mut v = AttributeValue::default();
         v.bs = Some(vec![bytes::Bytes::copy_from_slice(value.as_bytes())]);
         let mut update = rusoto_dynamodb::UpdateItemInput::default();
-        update.key = composite_key(key, NO_SORT_KEY);
+        update.key = composite_key(key.into(), NO_SORT_KEY);
         update.table_name = self.table_name.clone();
         update.update_expression = Some("ADD v :v".to_string());
         update.expression_attribute_values = Some(vec![(":v".to_string(), v)].into_iter().collect());
@@ -324,10 +321,10 @@ impl super::Backend for Backend {
         Ok(())
     }
 
-    async fn s_members<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Vec<Value>> {
+    async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
         let mut get = rusoto_dynamodb::GetItemInput::default();
         get.consistent_read = Some(!self.allow_eventually_consistent_reads);
-        get.key = composite_key(key, NO_SORT_KEY);
+        get.key = composite_key(key.into(), NO_SORT_KEY);
         get.table_name = self.table_name.clone();
         let result = self.client.get_item(get).await?;
         Ok(result
@@ -338,11 +335,11 @@ impl super::Backend for Backend {
             .unwrap_or(vec![]))
     }
 
-    async fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(&self, key: K, n: i64) -> Result<i64> {
+    async fn n_incr_by<'a, K: Key<'a>>(&self, key: K, n: i64) -> Result<i64> {
         let mut v = AttributeValue::default();
         v.n = Some(n.to_string());
         let mut update = rusoto_dynamodb::UpdateItemInput::default();
-        update.key = composite_key(key, NO_SORT_KEY);
+        update.key = composite_key(key.into(), NO_SORT_KEY);
         update.table_name = self.table_name.clone();
         update.update_expression = Some("ADD v :n".to_string());
         update.expression_attribute_values = Some(vec![(":n".to_string(), v)].into_iter().collect());
@@ -355,7 +352,7 @@ impl super::Backend for Backend {
         Ok(new_value.parse()?)
     }
 
-    async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+    async fn h_set<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
         &self,
         key: K,
         fields: I,
@@ -370,7 +367,7 @@ impl super::Backend for Backend {
             })
             .unzip();
         let mut update = rusoto_dynamodb::UpdateItemInput::default();
-        update.key = composite_key(key, NO_SORT_KEY);
+        update.key = composite_key(key.into(), NO_SORT_KEY);
         update.table_name = self.table_name.clone();
         update.update_expression = Some(format!(
             "SET {}",
@@ -382,14 +379,14 @@ impl super::Backend for Backend {
         Ok(())
     }
 
-    async fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
+    async fn h_del<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
         let names: HashMap<_, _> = fields
             .into_iter()
             .enumerate()
             .map(|(i, f)| (format!("#n{}", i), encode_field_name(f.into().as_bytes())))
             .collect();
         let mut update = rusoto_dynamodb::UpdateItemInput::default();
-        update.key = composite_key(key, NO_SORT_KEY);
+        update.key = composite_key(key.into(), NO_SORT_KEY);
         update.table_name = self.table_name.clone();
         update.update_expression = Some(format!(
             "REMOVE {}",
@@ -400,10 +397,10 @@ impl super::Backend for Backend {
         Ok(())
     }
 
-    async fn h_get<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
+    async fn h_get<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
         let mut get = rusoto_dynamodb::GetItemInput::default();
         get.consistent_read = Some(!self.allow_eventually_consistent_reads);
-        get.key = composite_key(key, NO_SORT_KEY);
+        get.key = composite_key(key.into(), NO_SORT_KEY);
         get.table_name = self.table_name.clone();
         let result = self.client.get_item(get).await?;
         Ok(result
@@ -413,10 +410,10 @@ impl super::Backend for Backend {
             .map(|v| v.to_vec().into()))
     }
 
-    async fn h_get_all<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
+    async fn h_get_all<'a, K: Key<'a>>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
         let mut get = rusoto_dynamodb::GetItemInput::default();
         get.consistent_read = Some(!self.allow_eventually_consistent_reads);
-        get.key = composite_key(key, NO_SORT_KEY);
+        get.key = composite_key(key.into(), NO_SORT_KEY);
         get.table_name = self.table_name.clone();
         let result = self.client.get_item(get).await?;
         Ok(result
@@ -429,24 +426,18 @@ impl super::Backend for Backend {
             .unwrap_or(HashMap::new()))
     }
 
-    async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
+    async fn z_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
         let v = value.into();
         self.zh_add(key, &v, &v, score).await
     }
 
-    async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
-        &self,
-        key: K,
-        field: F,
-        value: V,
-        score: f64,
-    ) -> Result<()> {
+    async fn zh_add<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(&self, key: K, field: F, value: V, score: f64) -> Result<()> {
         let field = field.into();
         let value = value.into();
         let mut put = rusoto_dynamodb::PutItemInput::default();
         put.table_name = self.table_name.clone();
         put.item = new_item(
-            key,
+            key.into(),
             &field,
             vec![
                 ("v", attribute_value(&value)),
@@ -457,19 +448,19 @@ impl super::Backend for Backend {
         Ok(())
     }
 
-    async fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
+    async fn zh_rem<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
         let mut delete = rusoto_dynamodb::DeleteItemInput::default();
         delete.table_name = self.table_name.clone();
-        delete.key = composite_key(key, field);
+        delete.key = composite_key(key.into(), field);
         self.client.delete_item(delete).await?;
         Ok(())
     }
 
-    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+    async fn z_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         self.zh_rem(key, value).await
     }
 
-    async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+    async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         if min > max {
             return Ok(0);
         }
@@ -501,29 +492,29 @@ impl super::Backend for Backend {
         Ok(count)
     }
 
-    async fn zh_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+    async fn zh_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         self.z_count(key, min, max).await
     }
 
-    async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+    async fn z_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.z_range_impl(key, min.into(), max.into(), limit, false, true).await
     }
 
-    async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+    async fn zh_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.z_range_by_score(key, min, max, limit).await
     }
 
-    async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+    async fn z_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.z_range_impl(key, min.into(), max.into(), limit, true, true).await
     }
 
-    async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+    async fn zh_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.z_rev_range_by_score(key, min, max, limit).await
     }
 
-    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+    async fn z_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
         min: Bound<M>,
@@ -534,7 +525,7 @@ impl super::Backend for Backend {
         self.z_range_impl(key, min, max, limit, false, true).await
     }
 
-    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
         min: Bound<M>,
@@ -555,7 +546,7 @@ impl super::Backend for Backend {
             .ops
             .iter()
             .map(|op| match op {
-                BatchSubOperation::Get(key, _) => composite_key(key, NO_SORT_KEY),
+                BatchSubOperation::Get(key, _) => composite_key(key.clone(), NO_SORT_KEY),
             })
             .collect();
 
@@ -570,7 +561,7 @@ impl super::Backend for Backend {
             .map(|op| match op {
                 BatchSubOperation::Get(key, tx) => {
                     let span = info_span!("get", ?key);
-                    (key.as_bytes(), Op { tx, _span: span })
+                    (key.unredacted.as_bytes(), Op { tx, _span: span })
                 }
             })
             .collect();
