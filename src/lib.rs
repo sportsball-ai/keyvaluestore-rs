@@ -74,6 +74,18 @@ pub fn unredacted<'a, A: Into<Arg<'a>>>(a: A) -> impl Key<'a> {
     UnredactedKey(a.into())
 }
 
+/// Static strings (typically literals) are assumed to be non-sensitive.
+impl Key<'static> for &'static str {}
+
+impl Into<ExplicitKey<'static>> for &'static str {
+    fn into(self) -> ExplicitKey<'static> {
+        ExplicitKey {
+            redacted: self.into(),
+            unredacted: self.into(),
+        }
+    }
+}
+
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct ExplicitKey<'a> {
