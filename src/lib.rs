@@ -86,29 +86,34 @@ impl Into<ExplicitKey<'static>> for &'static str {
     }
 }
 
-#[doc(hidden)]
 #[derive(Clone)]
 pub struct ExplicitKey<'a> {
-    redacted: Arg<'a>,
-    unredacted: Arg<'a>,
+    pub redacted: Arg<'a>,
+    pub unredacted: Arg<'a>,
 }
 
-struct ExplicitKeyView<'a>(&'a ExplicitKey<'a>);
+impl<'a> PartialEq for ExplicitKey<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.unredacted == other.unredacted
+    }
+}
 
-impl<'a> Key<'a> for ExplicitKeyView<'a> {}
+impl<'a> Key<'a> for &'a ExplicitKey<'a> {}
 
-impl<'a> From<ExplicitKeyView<'a>> for ExplicitKey<'a> {
-    fn from(val: ExplicitKeyView<'a>) -> Self {
+impl<'a> From<&'a ExplicitKey<'a>> for ExplicitKey<'a> {
+    fn from(val: &'a ExplicitKey<'a>) -> Self {
         Self {
-            redacted: Arg::Borrowed(val.0.redacted.as_bytes()),
-            unredacted: Arg::Borrowed(val.0.unredacted.as_bytes()),
+            redacted: Arg::Borrowed(val.redacted.as_bytes()),
+            unredacted: Arg::Borrowed(val.unredacted.as_bytes()),
         }
     }
 }
 
+impl<'a> Key<'a> for ExplicitKey<'a> {}
+
 impl std::fmt::Debug for ExplicitKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        std::fmt::Debug::fmt(&self.redacted, f)
+        std::fmt::Display::fmt(&self.redacted.as_bytes().escape_ascii(), f)
     }
 }
 
@@ -183,9 +188,9 @@ impl<'a> Into<Arg<'a>> for &'a String {
     }
 }
 
-impl std::fmt::Debug for Arg<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        std::fmt::Display::fmt(&self.as_bytes().escape_ascii(), f)
+impl<'a> PartialEq for Arg<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
     }
 }
 
@@ -285,7 +290,7 @@ pub trait Backend {
         for op in op.ops {
             match op {
                 BatchSubOperation::Get(key, tx) => {
-                    if let Some(v) = self.get(ExplicitKeyView(&key)).await? {
+                    if let Some(v) = self.get(&key).await? {
                         match tx.try_send(v) {
                             Ok(_) => {}
                             Err(mpsc::TrySendError::Disconnected(_)) => {}

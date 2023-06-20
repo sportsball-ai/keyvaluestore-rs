@@ -1,4 +1,4 @@
-use crate::{ExplicitKeyView, GetResult};
+use crate::GetResult;
 
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Key, Result, Value};
 use std::{
@@ -75,7 +75,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         match self.load(&key.unredacted) {
             Some(Entry::Get(v)) => Ok(v),
             _ => {
-                let v = self.inner.get(ExplicitKeyView(&key)).await?;
+                let v = self.inner.get(&key).await?;
                 self.store(key.unredacted, Entry::Get(v.clone()));
                 Ok(v)
             }
@@ -84,35 +84,35 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
 
     async fn set<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let key = key.into();
-        let r = self.inner.set(ExplicitKeyView(&key), value).await;
+        let r = self.inner.set(&key, value).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
 
     async fn set_eq<'a, 'b, 'c, K: Key<'a>, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(&self, key: K, value: V, old_value: OV) -> Result<bool> {
         let key = key.into();
-        let r = self.inner.set_eq(ExplicitKeyView(&key), value, old_value).await;
+        let r = self.inner.set_eq(&key, value, old_value).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
 
     async fn set_nx<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
         let key = key.into();
-        let r = self.inner.set_nx(ExplicitKeyView(&key), value).await;
+        let r = self.inner.set_nx(&key, value).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
 
     async fn delete<'a, K: Key<'a>>(&self, key: K) -> Result<bool> {
         let key = key.into();
-        let r = self.inner.delete(ExplicitKeyView(&key)).await;
+        let r = self.inner.delete(&key).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
 
     async fn s_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let key = key.into();
-        let r = self.inner.s_add(ExplicitKeyView(&key), value).await;
+        let r = self.inner.s_add(&key, value).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
@@ -122,7 +122,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         match self.load(&key.unredacted) {
             Some(Entry::SMembers(v)) => Ok(v),
             _ => {
-                let v = self.inner.s_members(ExplicitKeyView(&key)).await?;
+                let v = self.inner.s_members(&key).await?;
                 self.store(key.unredacted, Entry::SMembers(v.clone()));
                 Ok(v)
             }
@@ -131,7 +131,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
 
     async fn n_incr_by<'a, K: Key<'a>>(&self, key: K, n: i64) -> Result<i64> {
         let key = key.into();
-        let r = self.inner.n_incr_by(ExplicitKeyView(&key), n).await;
+        let r = self.inner.n_incr_by(&key, n).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
@@ -142,14 +142,14 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         fields: I,
     ) -> Result<()> {
         let key = key.into();
-        let r = self.inner.h_set(ExplicitKeyView(&key), fields).await;
+        let r = self.inner.h_set(&key, fields).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
 
     async fn h_del<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
         let key = key.into();
-        let r = self.inner.h_del(ExplicitKeyView(&key), fields).await;
+        let r = self.inner.h_del(&key, fields).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
@@ -166,7 +166,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
             Some(Entry::HGetAll(m)) => return Ok(m.get(field.as_bytes()).cloned()),
             _ => {}
         }
-        let v = self.inner.h_get(ExplicitKeyView(&key), &field).await?;
+        let v = self.inner.h_get(&key, &field).await?;
         self.update(key.unredacted, |entry| match entry {
             Entry::HGetAll(_) => {}
             Entry::HGet(m) => {
@@ -186,7 +186,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         match self.load(&key.unredacted) {
             Some(Entry::HGetAll(v)) => Ok(v),
             _ => {
-                let v = self.inner.h_get_all(ExplicitKeyView(&key)).await?;
+                let v = self.inner.h_get_all(&key).await?;
                 self.store(key.unredacted, Entry::HGetAll(v.clone()));
                 Ok(v)
             }
@@ -195,21 +195,21 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
 
     async fn z_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
         let key = key.into();
-        let r = self.inner.z_add(ExplicitKeyView(&key), value, score).await;
+        let r = self.inner.z_add(&key, value, score).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
 
     async fn z_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let key = key.into();
-        let r = self.inner.z_rem(ExplicitKeyView(&key), value).await;
+        let r = self.inner.z_rem(&key, value).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
 
     async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         let key = key.into();
-        let r = self.inner.z_count(ExplicitKeyView(&key), min, max).await;
+        let r = self.inner.z_count(&key, min, max).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
@@ -224,7 +224,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
 
     async fn zh_add<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(&self, key: K, field: F, value: V, score: f64) -> Result<()> {
         let key = key.into();
-        let r = self.inner.zh_add(ExplicitKeyView(&key), field, value, score).await;
+        let r = self.inner.zh_add(&key, field, value, score).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
@@ -243,7 +243,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
 
     async fn zh_rem<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
         let key = key.into();
-        let r = self.inner.zh_rem(ExplicitKeyView(&key), field).await;
+        let r = self.inner.zh_rem(&key, field).await;
         self.invalidate(key.unredacted.as_bytes());
         r
     }
