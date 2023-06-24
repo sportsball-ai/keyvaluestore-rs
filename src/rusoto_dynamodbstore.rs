@@ -166,15 +166,18 @@ fn decode_field_name(name: &String) -> Option<Vec<u8>> {
 }
 
 impl Backend {
-    async fn z_range_impl<'k, 'm, 'n, K: Key<'k>, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(
+    async fn zh_range_impl<'k, 'm, 'n, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(
         &self,
-        key: K,
+        key: ExplicitKey<'k>,
         min: Bound<M>,
         max: Bound<N>,
         limit: usize,
         reverse: bool,
         secondary_index: bool,
     ) -> Result<Vec<Value>> {
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+
         let min = map_bound(min, |v| v.into());
         let max = map_bound(max, |v| v.into());
 
@@ -196,8 +199,10 @@ impl Backend {
         query.expression_attribute_values = Some(attribute_values.clone());
         query.scan_index_forward = Some(!reverse);
         query.index_name = if secondary_index { Some("rk2".to_string()) } else { None };
+        query.return_consumed_capacity = Some("TOTAL".to_owned());
 
         let mut members = vec![];
+        let mut cap = TotalConsumedCapacity::default();
 
         while limit == 0 || members.len() < limit {
             let mut q = query.clone();
@@ -205,6 +210,9 @@ impl Backend {
                 q.limit = Some((limit - members.len() + 1) as _);
             }
             let result = self.client.query(q).await?;
+            if let Some(c) = result.consumed_capacity {
+                cap.add(&c);
+            }
             if let Some(mut items) = result.items {
                 let mut skip = 0;
 
@@ -251,220 +259,56 @@ impl Backend {
         while limit > 0 && members.len() > limit {
             members.pop();
         }
+        cap.record_to(&span);
         Ok(members)
     }
-}
 
-#[async_trait]
-impl super::Backend for Backend {
-    async fn get<'a, K: Key<'a>>(&self, key: K) -> Result<Option<Value>> {
-        let mut get = rusoto_dynamodb::GetItemInput::default();
-        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
-        get.key = composite_key(key.into(), NO_SORT_KEY);
-        get.table_name = self.table_name.clone();
-        let result = self.client.get_item(get).await?;
-        Ok(result.item.and_then(|mut item| item.remove("v")).and_then(|v| v.b).map(|v| v.to_vec().into()))
-    }
-
-    async fn set<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
-        let mut put = rusoto_dynamodb::PutItemInput::default();
-        put.table_name = self.table_name.clone();
-        put.item = new_item(key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))]);
-        self.client.put_item(put).await?;
-        Ok(())
-    }
-
-    async fn set_eq<'a, 'b, 'c, K: Key<'a>, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(&self, key: K, value: V, old_value: OV) -> Result<bool> {
-        let mut put = rusoto_dynamodb::PutItemInput::default();
-        put.table_name = self.table_name.clone();
-        put.item = new_item(key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))]);
-        put.condition_expression = Some("v = :v".to_string());
-        put.expression_attribute_values = Some(vec![(":v".to_string(), attribute_value(old_value))].into_iter().collect());
-        match self.client.put_item(put).await {
-            Ok(_) => Ok(true),
-            Err(RusotoError::Service(rusoto_dynamodb::PutItemError::ConditionalCheckFailed(_))) => Ok(false),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    async fn set_nx<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
-        let mut put = rusoto_dynamodb::PutItemInput::default();
-        put.table_name = self.table_name.clone();
-        put.item = new_item(key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))]);
-        put.condition_expression = Some("attribute_not_exists(v)".to_string());
-        match self.client.put_item(put).await {
-            Ok(_) => Ok(true),
-            Err(RusotoError::Service(rusoto_dynamodb::PutItemError::ConditionalCheckFailed(_))) => Ok(false),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    async fn delete<'a, K: Key<'a>>(&self, key: K) -> Result<bool> {
-        let mut delete = rusoto_dynamodb::DeleteItemInput::default();
-        delete.table_name = self.table_name.clone();
-        delete.key = composite_key(key.into(), NO_SORT_KEY);
-        delete.return_values = Some("ALL_OLD".to_string());
-        let result = self.client.delete_item(delete).await?;
-        Ok(result.attributes.is_some())
-    }
-
-    async fn s_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
-        let value = value.into();
-        let mut v = AttributeValue::default();
-        v.bs = Some(vec![bytes::Bytes::copy_from_slice(value.as_bytes())]);
-        let mut update = rusoto_dynamodb::UpdateItemInput::default();
-        update.key = composite_key(key.into(), NO_SORT_KEY);
-        update.table_name = self.table_name.clone();
-        update.update_expression = Some("ADD v :v".to_string());
-        update.expression_attribute_values = Some(vec![(":v".to_string(), v)].into_iter().collect());
-        self.client.update_item(update).await?;
-        Ok(())
-    }
-
-    async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
-        let mut get = rusoto_dynamodb::GetItemInput::default();
-        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
-        get.key = composite_key(key.into(), NO_SORT_KEY);
-        get.table_name = self.table_name.clone();
-        let result = self.client.get_item(get).await?;
-        Ok(result
-            .item
-            .and_then(|mut item| item.remove("v"))
-            .and_then(|v| v.bs)
-            .map(|v| v.iter().map(|v| v.to_vec().into()).collect())
-            .unwrap_or(vec![]))
-    }
-
-    async fn n_incr_by<'a, K: Key<'a>>(&self, key: K, n: i64) -> Result<i64> {
-        let mut v = AttributeValue::default();
-        v.n = Some(n.to_string());
-        let mut update = rusoto_dynamodb::UpdateItemInput::default();
-        update.key = composite_key(key.into(), NO_SORT_KEY);
-        update.table_name = self.table_name.clone();
-        update.update_expression = Some("ADD v :n".to_string());
-        update.expression_attribute_values = Some(vec![(":n".to_string(), v)].into_iter().collect());
-        update.return_values = Some("ALL_NEW".to_string());
-        let output = self.client.update_item(update).await?;
-        let new_value = match output.attributes.and_then(|mut h| h.remove("v")).and_then(|v| v.n) {
-            Some(v) => v,
-            None => return Err(SimpleError::new("new value not returned by dynamodb").into()),
-        };
-        Ok(new_value.parse()?)
-    }
-
-    async fn h_set<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+    async fn zh_add_impl<'a, 'b, 'c, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
         &self,
-        key: K,
-        fields: I,
+        key: ExplicitKey<'a>,
+        field: F,
+        value: V,
+        score: f64,
     ) -> Result<()> {
-        let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
-            .into_iter()
-            .enumerate()
-            .map(|(i, f)| {
-                let mut v = AttributeValue::default();
-                v.b = Some(f.1.into().into_vec().into());
-                ((format!("#n{}", i), encode_field_name(f.0.into().as_bytes())), (format!(":n{}", i), v))
-            })
-            .unzip();
-        let mut update = rusoto_dynamodb::UpdateItemInput::default();
-        update.key = composite_key(key.into(), NO_SORT_KEY);
-        update.table_name = self.table_name.clone();
-        update.update_expression = Some(format!(
-            "SET {}",
-            (0..names.len()).map(|i| format!("#n{} = :n{}", i, i)).collect::<Vec<_>>().join(", ")
-        ));
-        update.expression_attribute_values = Some(values);
-        update.expression_attribute_names = Some(names);
-        self.client.update_item(update).await?;
-        Ok(())
-    }
-
-    async fn h_del<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
-        let names: HashMap<_, _> = fields
-            .into_iter()
-            .enumerate()
-            .map(|(i, f)| (format!("#n{}", i), encode_field_name(f.into().as_bytes())))
-            .collect();
-        let mut update = rusoto_dynamodb::UpdateItemInput::default();
-        update.key = composite_key(key.into(), NO_SORT_KEY);
-        update.table_name = self.table_name.clone();
-        update.update_expression = Some(format!(
-            "REMOVE {}",
-            (0..names.len()).map(|i| format!("#n{}", i)).collect::<Vec<_>>().join(", ")
-        ));
-        update.expression_attribute_names = Some(names);
-        self.client.update_item(update).await?;
-        Ok(())
-    }
-
-    async fn h_get<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
-        let mut get = rusoto_dynamodb::GetItemInput::default();
-        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
-        get.key = composite_key(key.into(), NO_SORT_KEY);
-        get.table_name = self.table_name.clone();
-        let result = self.client.get_item(get).await?;
-        Ok(result
-            .item
-            .and_then(|mut item| item.remove(&encode_field_name(field.into().as_bytes())))
-            .and_then(|v| v.b)
-            .map(|v| v.to_vec().into()))
-    }
-
-    async fn h_get_all<'a, K: Key<'a>>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
-        let mut get = rusoto_dynamodb::GetItemInput::default();
-        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
-        get.key = composite_key(key.into(), NO_SORT_KEY);
-        get.table_name = self.table_name.clone();
-        let result = self.client.get_item(get).await?;
-        Ok(result
-            .item
-            .map(|item| {
-                item.into_iter()
-                    .filter_map(|(name, v)| decode_field_name(&name).and_then(|name| v.b.map(|v| (name, (*v).into()))))
-                    .collect()
-            })
-            .unwrap_or(HashMap::new()))
-    }
-
-    async fn z_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
-        let v = value.into();
-        self.zh_add(key, &v, &v, score).await
-    }
-
-    async fn zh_add<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(&self, key: K, field: F, value: V, score: f64) -> Result<()> {
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
         let field = field.into();
         let value = value.into();
         let mut put = rusoto_dynamodb::PutItemInput::default();
         put.table_name = self.table_name.clone();
         put.item = new_item(
-            key.into(),
+            key,
             &field,
             vec![
                 ("v", attribute_value(&value)),
                 ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
             ],
         );
-        self.client.put_item(put).await?;
+        put.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.put_item(put).await?;
+        record_cap(&result.consumed_capacity, &span);
         Ok(())
     }
 
-    async fn zh_rem<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
+    async fn zh_rem_impl<'a, 'b, F: Into<Arg<'b>> + Send>(&self, key: ExplicitKey<'a>, field: F) -> Result<()> {
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
         let mut delete = rusoto_dynamodb::DeleteItemInput::default();
         delete.table_name = self.table_name.clone();
         delete.key = composite_key(key.into(), field);
-        self.client.delete_item(delete).await?;
+        delete.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.delete_item(delete).await?;
+        record_cap(&result.consumed_capacity, &span);
         Ok(())
     }
 
-    async fn z_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
-        self.zh_rem(key, value).await
-    }
-
-    async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+    async fn zh_count_impl<'a>(&self, key: ExplicitKey<'a>, min: f64, max: f64) -> Result<usize> {
         if min > max {
             return Ok(0);
         }
 
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
         let (min, max) = score_bounds(min, max);
         let (condition, attribute_values) = query_condition(key, min, max, true);
 
@@ -475,13 +319,18 @@ impl super::Backend for Backend {
         query.expression_attribute_values = Some(attribute_values.clone());
         query.index_name = Some("rk2".to_string());
         query.select = Some("COUNT".to_string());
+        query.return_consumed_capacity = Some("TOTAL".to_owned());
 
         let mut count = 0;
+        let mut cap = TotalConsumedCapacity::default();
 
         loop {
             let result = self.client.query(query.clone()).await?;
             if let Some(n) = result.count {
                 count += n as usize;
+            }
+            if let Some(c) = result.consumed_capacity {
+                cap.add(&c);
             }
             match result.last_evaluated_key {
                 Some(key) => query.exclusive_start_key = Some(key),
@@ -489,31 +338,314 @@ impl super::Backend for Backend {
             }
         }
 
+        cap.record_to(&span);
         Ok(count)
     }
+}
 
-    async fn zh_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
-        self.z_count(key, min, max).await
+#[async_trait]
+impl super::Backend for Backend {
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    async fn get<'a, K: Key<'a>>(&self, key: K) -> Result<Option<Value>> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let mut get = rusoto_dynamodb::GetItemInput::default();
+        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
+        get.key = composite_key(key, NO_SORT_KEY);
+        get.table_name = self.table_name.clone();
+        get.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.get_item(get).await?;
+        record_cap(&result.consumed_capacity, &span);
+        Ok(result.item.and_then(|mut item| item.remove("v")).and_then(|v| v.b).map(|v| v.to_vec().into()))
     }
 
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn set<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let mut put = rusoto_dynamodb::PutItemInput::default();
+        put.table_name = self.table_name.clone();
+        put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
+        put.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.put_item(put).await?;
+        record_cap(&result.consumed_capacity, &span);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn set_eq<'a, 'b, 'c, K: Key<'a>, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(&self, key: K, value: V, old_value: OV) -> Result<bool> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let mut put = rusoto_dynamodb::PutItemInput::default();
+        put.table_name = self.table_name.clone();
+        put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
+        put.condition_expression = Some("v = :v".to_string());
+        put.expression_attribute_values = Some(vec![(":v".to_string(), attribute_value(old_value))].into_iter().collect());
+        put.return_consumed_capacity = Some("TOTAL".to_owned());
+        match self.client.put_item(put).await {
+            Ok(result) => {
+                record_cap(&result.consumed_capacity, &span);
+                Ok(true)
+            }
+            Err(RusotoError::Service(rusoto_dynamodb::PutItemError::ConditionalCheckFailed(_))) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn set_nx<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let mut put = rusoto_dynamodb::PutItemInput::default();
+        put.table_name = self.table_name.clone();
+        put.item = new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
+        put.condition_expression = Some("attribute_not_exists(v)".to_string());
+        put.return_consumed_capacity = Some("TOTAL".to_owned());
+        match self.client.put_item(put).await {
+            Ok(result) => {
+                record_cap(&result.consumed_capacity, &span);
+                Ok(true)
+            }
+            Err(RusotoError::Service(rusoto_dynamodb::PutItemError::ConditionalCheckFailed(_))) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn delete<'a, K: Key<'a>>(&self, key: K) -> Result<bool> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let mut delete = rusoto_dynamodb::DeleteItemInput::default();
+        delete.table_name = self.table_name.clone();
+        delete.key = composite_key(key, NO_SORT_KEY);
+        delete.return_values = Some("ALL_OLD".to_string());
+        delete.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.delete_item(delete).await?;
+        record_cap(&result.consumed_capacity, &span);
+        Ok(result.attributes.is_some())
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn s_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let value = value.into();
+        let mut v = AttributeValue::default();
+        v.bs = Some(vec![bytes::Bytes::copy_from_slice(value.as_bytes())]);
+        let mut update = rusoto_dynamodb::UpdateItemInput::default();
+        update.key = composite_key(key, NO_SORT_KEY);
+        update.table_name = self.table_name.clone();
+        update.update_expression = Some("ADD v :v".to_string());
+        update.expression_attribute_values = Some(vec![(":v".to_string(), v)].into_iter().collect());
+        update.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.update_item(update).await?;
+        record_cap(&result.consumed_capacity, &span);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let mut get = rusoto_dynamodb::GetItemInput::default();
+        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
+        get.key = composite_key(key, NO_SORT_KEY);
+        get.table_name = self.table_name.clone();
+        get.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.get_item(get).await?;
+        record_cap(&result.consumed_capacity, &span);
+        Ok(result
+            .item
+            .and_then(|mut item| item.remove("v"))
+            .and_then(|v| v.bs)
+            .map(|v| v.iter().map(|v| v.to_vec().into()).collect())
+            .unwrap_or(vec![]))
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn n_incr_by<'a, K: Key<'a>>(&self, key: K, n: i64) -> Result<i64> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let mut v = AttributeValue::default();
+        v.n = Some(n.to_string());
+        let mut update = rusoto_dynamodb::UpdateItemInput::default();
+        update.key = composite_key(key, NO_SORT_KEY);
+        update.table_name = self.table_name.clone();
+        update.update_expression = Some("ADD v :n".to_string());
+        update.expression_attribute_values = Some(vec![(":n".to_string(), v)].into_iter().collect());
+        update.return_values = Some("ALL_NEW".to_string());
+        update.return_consumed_capacity = Some("TOTAL".to_owned());
+        let output = self.client.update_item(update).await?;
+        record_cap(&output.consumed_capacity, &span);
+        let new_value = match output.attributes.and_then(|mut h| h.remove("v")).and_then(|v| v.n) {
+            Some(v) => v,
+            None => return Err(SimpleError::new("new value not returned by dynamodb").into()),
+        };
+        Ok(new_value.parse()?)
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn h_set<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+        &self,
+        key: K,
+        fields: I,
+    ) -> Result<()> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let mut v = AttributeValue::default();
+                v.b = Some(f.1.into().into_vec().into());
+                ((format!("#n{}", i), encode_field_name(f.0.into().as_bytes())), (format!(":n{}", i), v))
+            })
+            .unzip();
+        let mut update = rusoto_dynamodb::UpdateItemInput::default();
+        update.key = composite_key(key, NO_SORT_KEY);
+        update.table_name = self.table_name.clone();
+        update.update_expression = Some(format!(
+            "SET {}",
+            (0..names.len()).map(|i| format!("#n{} = :n{}", i, i)).collect::<Vec<_>>().join(", ")
+        ));
+        update.expression_attribute_values = Some(values);
+        update.expression_attribute_names = Some(names);
+        update.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.update_item(update).await?;
+        record_cap(&result.consumed_capacity, &span);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn h_del<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let names: HashMap<_, _> = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, f)| (format!("#n{}", i), encode_field_name(f.into().as_bytes())))
+            .collect();
+        let mut update = rusoto_dynamodb::UpdateItemInput::default();
+        update.key = composite_key(key, NO_SORT_KEY);
+        update.table_name = self.table_name.clone();
+        update.update_expression = Some(format!(
+            "REMOVE {}",
+            (0..names.len()).map(|i| format!("#n{}", i)).collect::<Vec<_>>().join(", ")
+        ));
+        update.expression_attribute_names = Some(names);
+        update.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.update_item(update).await?;
+        record_cap(&result.consumed_capacity, &span);
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    async fn h_get<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let mut get = rusoto_dynamodb::GetItemInput::default();
+        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
+        get.key = composite_key(key.into(), NO_SORT_KEY);
+        get.table_name = self.table_name.clone();
+        get.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.get_item(get).await?;
+        record_cap(&result.consumed_capacity, &span);
+        Ok(result
+            .item
+            .and_then(|mut item| item.remove(&encode_field_name(field.into().as_bytes())))
+            .and_then(|v| v.b)
+            .map(|v| v.to_vec().into()))
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    async fn h_get_all<'a, K: Key<'a>>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+        let mut get = rusoto_dynamodb::GetItemInput::default();
+        get.consistent_read = Some(!self.allow_eventually_consistent_reads);
+        get.key = composite_key(key, NO_SORT_KEY);
+        get.table_name = self.table_name.clone();
+        get.return_consumed_capacity = Some("TOTAL".to_owned());
+        let result = self.client.get_item(get).await?;
+        record_cap(&result.consumed_capacity, &span);
+        Ok(result
+            .item
+            .map(|item| {
+                item.into_iter()
+                    .filter_map(|(name, v)| decode_field_name(&name).and_then(|name| v.b.map(|v| (name, (*v).into()))))
+                    .collect()
+            })
+            .unwrap_or(HashMap::new()))
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn z_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
+        let v = value.into();
+        self.zh_add_impl(key.into(), &v, &v, score).await
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn zh_add<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(&self, key: K, field: F, value: V, score: f64) -> Result<()> {
+        self.zh_add_impl(key.into(), field, value, score).await
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn zh_rem<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
+        self.zh_rem_impl(key.into(), field).await
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    async fn z_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        self.zh_rem_impl(key.into(), value).await
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+        self.zh_count_impl(key.into(), min, max).await
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    async fn zh_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+        self.zh_count_impl(key.into(), min, max).await
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
     async fn z_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
-        self.z_range_impl(key, min.into(), max.into(), limit, false, true).await
+        self.zh_range_impl(key.into(), min.into(), max.into(), limit, false, true).await
     }
 
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
     async fn zh_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
-        self.z_range_by_score(key, min, max, limit).await
+        let (min, max) = score_bounds(min, max);
+        self.zh_range_impl(key.into(), min.into(), max.into(), limit, false, true).await
     }
 
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
     async fn z_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
-        self.z_range_impl(key, min.into(), max.into(), limit, true, true).await
+        self.zh_range_impl(key.into(), min.into(), max.into(), limit, true, true).await
     }
 
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
     async fn zh_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
-        self.z_rev_range_by_score(key, min, max, limit).await
+        let (min, max) = score_bounds(min, max);
+        self.zh_range_impl(key.into(), min.into(), max.into(), limit, true, true).await
     }
 
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
     async fn z_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
@@ -522,9 +654,10 @@ impl super::Backend for Backend {
         limit: usize,
     ) -> Result<Vec<Value>> {
         let (min, max) = lex_bounds(0.0, min, max);
-        self.z_range_impl(key, min, max, limit, false, true).await
+        self.zh_range_impl(key.into(), min, max, limit, false, true).await
     }
 
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
     async fn z_rev_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
@@ -533,10 +666,10 @@ impl super::Backend for Backend {
         limit: usize,
     ) -> Result<Vec<Value>> {
         let (min, max) = lex_bounds(0.0, min, max);
-        self.z_range_impl(key, min, max, limit, true, true).await
+        self.zh_range_impl(key.into(), min, max, limit, true, true).await
     }
 
-    #[tracing::instrument(skip_all, fields(error, consumed_rcu))]
+    #[tracing::instrument(skip_all, err(Display), fields(consumed_rcu))]
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
         if op.ops.is_empty() {
             return Ok(());
@@ -577,14 +710,10 @@ impl super::Backend for Backend {
             keys_and_attributes.keys = batch;
             get.request_items.insert(self.table_name.clone(), keys_and_attributes);
             get.return_consumed_capacity = Some("TOTAL".to_owned());
-            let result = match self.client.batch_get_item(get).await {
-                Err(e) => {
-                    Span::current().record("error", &e as &(dyn std::error::Error + Send + 'static));
-                    return Err(e.into());
-                }
-                Ok(r) => r,
-            };
-            cap.add(result.consumed_capacity);
+            let result = self.client.batch_get_item(get).await?;
+            for c in result.consumed_capacity.iter().flatten() {
+                cap.add(&c);
+            }
 
             if let Some(items) = result.responses.and_then(|mut r| r.remove(&self.table_name)) {
                 for mut item in items {
@@ -597,10 +726,7 @@ impl super::Backend for Backend {
                         {
                             Some(Ok(_)) => {}
                             Some(Err(mpsc::TrySendError::Disconnected(_))) => {}
-                            Some(Err(e)) => {
-                                Span::current().record("error", &e as &(dyn std::error::Error + Send + 'static));
-                                return Err(e.into());
-                            }
+                            Some(Err(e)) => return Err(e.into()),
                             None => {}
                         }
                     }
@@ -616,7 +742,7 @@ impl super::Backend for Backend {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, fields(error, consumed_wcu))]
+    #[tracing::instrument(skip_all, err(Display), fields(consumed_wcu))]
     async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {
         let mut token = Vec::new();
         token.resize(20, 0u8);
@@ -829,10 +955,7 @@ impl super::Backend for Backend {
                                 match tx.try_send(true) {
                                     Ok(_) => {}
                                     Err(mpsc::TrySendError::Disconnected(_)) => {}
-                                    Err(e) => {
-                                        tracing::Span::current().record("error", &e as &(dyn std::error::Error + Sync + 'static));
-                                        return Err(e.into());
-                                    }
+                                    Err(e) => return Err(e.into()),
                                 }
                             }
                         }
@@ -841,17 +964,15 @@ impl super::Backend for Backend {
                 if did_fail_conditional {
                     Ok(false)
                 } else {
-                    tracing::Span::current().record("error", "atomic write conflict");
                     Err(Error::AtomicWriteConflict)
                 }
             }
-            Err(e) => {
-                tracing::Span::current().record("error", &e as &(dyn std::error::Error + Sync + 'static));
-                Err(e.into())
-            }
+            Err(e) => Err(e.into()),
             Ok(r) => {
                 let mut cap = TotalConsumedCapacity::default();
-                cap.add(r.consumed_capacity);
+                for c in r.consumed_capacity.iter().flatten() {
+                    cap.add(&c);
+                }
                 cap.record_to(&Span::current());
                 Ok(true)
             }
@@ -859,6 +980,7 @@ impl super::Backend for Backend {
     }
 }
 
+/// Tracks total consumed capacity by repeated/batch operations.
 #[derive(Default)]
 struct TotalConsumedCapacity {
     total_rcu: Option<f64>,
@@ -866,14 +988,12 @@ struct TotalConsumedCapacity {
 }
 
 impl TotalConsumedCapacity {
-    fn add(&mut self, capacity: Option<Vec<ConsumedCapacity>>) {
-        for c in capacity.as_deref().unwrap_or(&[]) {
-            if let Some(rcu) = c.read_capacity_units {
-                *self.total_rcu.get_or_insert(0.) += rcu;
-            }
-            if let Some(wcu) = c.write_capacity_units {
-                *self.total_wcu.get_or_insert(0.) += wcu;
-            }
+    fn add(&mut self, c: &ConsumedCapacity) {
+        if let Some(rcu) = c.read_capacity_units {
+            *self.total_rcu.get_or_insert(0.) += rcu;
+        }
+        if let Some(wcu) = c.write_capacity_units {
+            *self.total_wcu.get_or_insert(0.) += wcu;
         }
     }
 
@@ -886,6 +1006,17 @@ impl TotalConsumedCapacity {
         if let Some(wcu) = self.total_wcu {
             span.record("consumed_wcu", wcu);
         }
+    }
+}
+
+/// Records capacity used by a non-batch operation to the given span.
+fn record_cap(capacity: &Option<ConsumedCapacity>, span: &Span) {
+    let Some(capacity) = capacity else { return };
+    if let Some(rcu) = capacity.read_capacity_units {
+        span.record("consumed_rcu", rcu);
+    }
+    if let Some(wcu) = capacity.write_capacity_units {
+        span.record("consumed_wcu", wcu);
     }
 }
 

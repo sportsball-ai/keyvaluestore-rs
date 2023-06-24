@@ -77,11 +77,11 @@ pub fn unredacted<'a, A: Into<Arg<'a>>>(a: A) -> impl Key<'a> {
 /// Static strings (typically literals) are assumed to be non-sensitive.
 impl Key<'static> for &'static str {}
 
-impl Into<ExplicitKey<'static>> for &'static str {
-    fn into(self) -> ExplicitKey<'static> {
+impl From<&'static str> for ExplicitKey<'static> {
+    fn from(val: &'static str) -> Self {
         ExplicitKey {
-            redacted: self.into(),
-            unredacted: self.into(),
+            redacted: val.into(),
+            unredacted: val.into(),
         }
     }
 }
