@@ -3,6 +3,7 @@ name = "keyvaluestore"
 version = "0.1.0"
 authors = ["Christopher Brown <ccbrown112@gmail.com>"]
 edition = "2021"
+rust-version = "1.70"
 
 [dependencies]
 async-trait = "0.1.32"
