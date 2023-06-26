@@ -54,6 +54,69 @@ impl fmt::Display for Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+pub trait Key<'a>: Into<ExplicitKey<'a>> + Send + Sync {}
+
+struct UnredactedKey<'a>(Arg<'a>);
+
+impl<'a> Key<'a> for UnredactedKey<'a> {}
+
+impl<'a> From<UnredactedKey<'a>> for ExplicitKey<'a> {
+    fn from(val: UnredactedKey<'a>) -> Self {
+        Self {
+            redacted: val.0.clone(),
+            unredacted: val.0,
+        }
+    }
+}
+
+/// Returns a key which will not be redacted in trace/log output.
+pub fn unredacted<'a, A: Into<Arg<'a>>>(a: A) -> impl Key<'a> {
+    UnredactedKey(a.into())
+}
+
+/// Static strings (typically literals) are assumed to be non-sensitive.
+impl Key<'static> for &'static str {}
+
+impl From<&'static str> for ExplicitKey<'static> {
+    fn from(val: &'static str) -> Self {
+        ExplicitKey {
+            redacted: val.into(),
+            unredacted: val.into(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ExplicitKey<'a> {
+    pub redacted: Arg<'a>,
+    pub unredacted: Arg<'a>,
+}
+
+impl<'a> PartialEq for ExplicitKey<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.unredacted == other.unredacted
+    }
+}
+
+impl<'a> Key<'a> for &'a ExplicitKey<'a> {}
+
+impl<'a> From<&'a ExplicitKey<'a>> for ExplicitKey<'a> {
+    fn from(val: &'a ExplicitKey<'a>) -> Self {
+        Self {
+            redacted: Arg::Borrowed(val.redacted.as_bytes()),
+            unredacted: Arg::Borrowed(val.unredacted.as_bytes()),
+        }
+    }
+}
+
+impl<'a> Key<'a> for ExplicitKey<'a> {}
+
+impl std::fmt::Debug for ExplicitKey<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        std::fmt::Display::fmt(&self.redacted.as_bytes().escape_ascii(), f)
+    }
+}
+
 #[derive(Clone)]
 pub enum Arg<'a> {
     Owned(Vec<u8>),
@@ -125,6 +188,12 @@ impl<'a> Into<Arg<'a>> for &'a String {
     }
 }
 
+impl<'a> PartialEq for Arg<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, PartialOrd, Ord, Eq)]
 pub struct Value(Vec<u8>);
 
@@ -168,47 +237,42 @@ impl Value {
 
 #[async_trait]
 pub trait Backend {
-    async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>>;
-    async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
-    async fn set_eq<'a, 'b, 'c, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(
-        &self,
-        key: K,
-        value: V,
-        old_value: OV,
-    ) -> Result<bool>;
-    async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool>;
-    async fn delete<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<bool>;
+    async fn get<'a, K: Key<'a>>(&self, key: K) -> Result<Option<Value>>;
+    async fn set<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
+    async fn set_eq<'a, 'b, 'c, K: Key<'a>, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(&self, key: K, value: V, old_value: OV) -> Result<bool>;
+    async fn set_nx<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool>;
+    async fn delete<'a, K: Key<'a>>(&self, key: K) -> Result<bool>;
 
-    async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
-    async fn s_members<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Vec<Value>>;
+    async fn s_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
+    async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>>;
 
     /// Increments the number with the given key by some number, returning the new value. If the
     /// key doesn't exist, it's set to the given number instead. To get the current value, you
     /// can pass 0 as n.
-    async fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(&self, key: K, n: i64) -> Result<i64>;
+    async fn n_incr_by<'a, K: Key<'a>>(&self, key: K, n: i64) -> Result<i64>;
 
-    async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+    async fn h_set<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
         &self,
         key: K,
         fields: I,
     ) -> Result<()>;
-    async fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()>;
-    async fn h_get<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>>;
-    async fn h_get_all<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>>;
+    async fn h_del<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()>;
+    async fn h_get<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>>;
+    async fn h_get_all<'a, K: Key<'a>>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>>;
 
-    async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()>;
-    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
-    async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize>;
-    async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
-    async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
-    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+    async fn z_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()>;
+    async fn z_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
+    async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize>;
+    async fn z_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
+    async fn z_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
+    async fn z_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
         min: Bound<M>,
         max: Bound<N>,
         limit: usize,
     ) -> Result<Vec<Value>>;
-    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
         min: Bound<M>,
@@ -216,23 +280,17 @@ pub trait Backend {
         limit: usize,
     ) -> Result<Vec<Value>>;
 
-    async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
-        &self,
-        key: K,
-        field: F,
-        value: V,
-        score: f64,
-    ) -> Result<()>;
-    async fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()>;
-    async fn zh_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize>;
-    async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
-    async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
+    async fn zh_add<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(&self, key: K, field: F, value: V, score: f64) -> Result<()>;
+    async fn zh_rem<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()>;
+    async fn zh_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize>;
+    async fn zh_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
+    async fn zh_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
 
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
         for op in op.ops {
             match op {
                 BatchSubOperation::Get(key, tx) => {
-                    if let Some(v) = self.get(key).await? {
+                    if let Some(v) = self.get(&key).await? {
                         match tx.try_send(v) {
                             Ok(_) => {}
                             Err(mpsc::TrySendError::Disconnected(_)) => {}
@@ -264,7 +322,7 @@ impl GetResult {
 }
 
 pub enum BatchSubOperation<'a> {
-    Get(Arg<'a>, mpsc::SyncSender<Value>),
+    Get(ExplicitKey<'a>, mpsc::SyncSender<Value>),
 }
 
 pub struct BatchOperation<'a> {
@@ -276,9 +334,9 @@ impl<'a> BatchOperation<'a> {
         Self { ops: vec![] }
     }
 
-    pub fn get<K: Into<Arg<'a>> + Send>(&mut self, key: K) -> GetResult {
-        let (ret, tx) = GetResult::new();
-        self.ops.push(BatchSubOperation::Get(key.into(), tx));
+    pub fn get<K: Key<'a>>(&mut self, key: K) -> GetResult {
+        let (ret, value_tx) = GetResult::new();
+        self.ops.push(BatchSubOperation::Get(key.into(), value_tx));
         ret
     }
 }
@@ -299,20 +357,20 @@ impl ConditionalResult {
 }
 
 pub enum AtomicWriteSubOperation<'a> {
-    Set(Arg<'a>, Arg<'a>),
-    SetEQ(Arg<'a>, Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
-    SetNX(Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
-    ZAdd(Arg<'a>, Arg<'a>, f64),
-    ZHAdd(Arg<'a>, Arg<'a>, Arg<'a>, f64),
-    ZRem(Arg<'a>, Arg<'a>),
-    ZHRem(Arg<'a>, Arg<'a>),
-    Delete(Arg<'a>),
-    DeleteXX(Arg<'a>, mpsc::SyncSender<bool>),
-    SAdd(Arg<'a>, Arg<'a>),
-    SRem(Arg<'a>, Arg<'a>),
-    HSet(Arg<'a>, Vec<(Arg<'a>, Arg<'a>)>),
-    HSetNX(Arg<'a>, Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
-    HDel(Arg<'a>, Vec<Arg<'a>>),
+    Set(ExplicitKey<'a>, Arg<'a>),
+    SetEQ(ExplicitKey<'a>, Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
+    SetNX(ExplicitKey<'a>, Arg<'a>, mpsc::SyncSender<bool>),
+    ZAdd(ExplicitKey<'a>, Arg<'a>, f64),
+    ZHAdd(ExplicitKey<'a>, Arg<'a>, Arg<'a>, f64),
+    ZRem(ExplicitKey<'a>, Arg<'a>),
+    ZHRem(ExplicitKey<'a>, Arg<'a>),
+    Delete(ExplicitKey<'a>),
+    DeleteXX(ExplicitKey<'a>, mpsc::SyncSender<bool>),
+    SAdd(ExplicitKey<'a>, Arg<'a>),
+    SRem(ExplicitKey<'a>, Arg<'a>),
+    HSet(ExplicitKey<'a>, Vec<(Arg<'a>, Arg<'a>)>),
+    HSetNX(ExplicitKey<'a>, Arg<'a>, Arg<'a>, mpsc::SyncSender<bool>),
+    HDel(ExplicitKey<'a>, Vec<Arg<'a>>),
 }
 
 // DynamoDB can't do more than 25 operations in an atomic write so all backends should enforce this
@@ -328,11 +386,11 @@ impl<'a> AtomicWriteOperation<'a> {
         Self { ops: vec![] }
     }
 
-    pub fn set<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
+    pub fn set<'k: 'a, 'v: 'a, K: Key<'k>, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
         self.ops.push(AtomicWriteSubOperation::Set(key.into(), value.into()));
     }
 
-    pub fn set_eq<'k: 'a, 'v: 'a, 'ov: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send, OV: Into<Arg<'ov>> + Send>(
+    pub fn set_eq<'k: 'a, 'v: 'a, 'ov: 'a, K: Key<'k>, V: Into<Arg<'v>> + Send, OV: Into<Arg<'ov>> + Send>(
         &mut self,
         key: K,
         value: V,
@@ -343,53 +401,47 @@ impl<'a> AtomicWriteOperation<'a> {
         ret
     }
 
-    pub fn set_nx<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) -> ConditionalResult {
+    pub fn set_nx<'k: 'a, 'v: 'a, K: Key<'k>, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) -> ConditionalResult {
         let (ret, tx) = ConditionalResult::new();
         self.ops.push(AtomicWriteSubOperation::SetNX(key.into(), value.into(), tx));
         ret
     }
 
-    pub fn z_add<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V, score: f64) {
+    pub fn z_add<'k: 'a, 'v: 'a, K: Key<'k>, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V, score: f64) {
         self.ops.push(AtomicWriteSubOperation::ZAdd(key.into(), value.into(), score));
     }
 
-    pub fn zh_add<'k: 'a, 'f: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send>(
-        &mut self,
-        key: K,
-        field: F,
-        value: V,
-        score: f64,
-    ) {
+    pub fn zh_add<'k: 'a, 'f: 'a, 'v: 'a, K: Key<'k>, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, field: F, value: V, score: f64) {
         self.ops.push(AtomicWriteSubOperation::ZHAdd(key.into(), field.into(), value.into(), score));
     }
 
-    pub fn z_rem<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
+    pub fn z_rem<'k: 'a, 'v: 'a, K: Key<'k>, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
         self.ops.push(AtomicWriteSubOperation::ZRem(key.into(), value.into()));
     }
 
-    pub fn zh_rem<'k: 'a, 'f: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send>(&mut self, key: K, field: F) {
+    pub fn zh_rem<'k: 'a, 'f: 'a, K: Key<'k>, F: Into<Arg<'f>> + Send>(&mut self, key: K, field: F) {
         self.ops.push(AtomicWriteSubOperation::ZHRem(key.into(), field.into()));
     }
 
-    pub fn delete<'k: 'a, K: Into<Arg<'k>> + Send>(&mut self, key: K) {
+    pub fn delete<'k: 'a, K: Key<'k>>(&mut self, key: K) {
         self.ops.push(AtomicWriteSubOperation::Delete(key.into()));
     }
 
-    pub fn delete_xx<'k: 'a, K: Into<Arg<'k>> + Send>(&mut self, key: K) -> ConditionalResult {
+    pub fn delete_xx<'k: 'a, K: Key<'k>>(&mut self, key: K) -> ConditionalResult {
         let (ret, tx) = ConditionalResult::new();
         self.ops.push(AtomicWriteSubOperation::DeleteXX(key.into(), tx));
         ret
     }
 
-    pub fn s_add<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
+    pub fn s_add<'k: 'a, 'v: 'a, K: Key<'k>, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
         self.ops.push(AtomicWriteSubOperation::SAdd(key.into(), value.into()));
     }
 
-    pub fn s_rem<'k: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
+    pub fn s_rem<'k: 'a, 'v: 'a, K: Key<'k> + Send, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
         self.ops.push(AtomicWriteSubOperation::SRem(key.into(), value.into()));
     }
 
-    pub fn h_set<'k: 'a, 'f: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+    pub fn h_set<'k: 'a, 'f: 'a, 'v: 'a, K: Key<'k>, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
         &mut self,
         key: K,
         fields: I,
@@ -400,7 +452,7 @@ impl<'a> AtomicWriteOperation<'a> {
         ));
     }
 
-    pub fn h_set_nx<'k: 'a, 'f: 'a, 'v: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send>(
+    pub fn h_set_nx<'k: 'a, 'f: 'a, 'v: 'a, K: Key<'k>, F: Into<Arg<'f>> + Send, V: Into<Arg<'v>> + Send>(
         &mut self,
         key: K,
         field: F,
@@ -411,7 +463,7 @@ impl<'a> AtomicWriteOperation<'a> {
         ret
     }
 
-    pub fn h_del<'k: 'a, 'f: 'a, K: Into<Arg<'k>> + Send, F: Into<Arg<'f>> + Send, I: IntoIterator<Item = F> + Send>(&mut self, key: K, fields: I) {
+    pub fn h_del<'k: 'a, 'f: 'a, K: Key<'k>, F: Into<Arg<'f>> + Send, I: IntoIterator<Item = F> + Send>(&mut self, key: K, fields: I) {
         self.ops
             .push(AtomicWriteSubOperation::HDel(key.into(), fields.into_iter().map(|k| k.into()).collect()));
     }

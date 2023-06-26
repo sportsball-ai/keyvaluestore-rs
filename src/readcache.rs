@@ -1,4 +1,6 @@
-use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Result, Value};
+use crate::GetResult;
+
+use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Key, Result, Value};
 use std::{
     collections::HashMap,
     ops::Bound,
@@ -52,8 +54,8 @@ impl<B> Backend<B> {
         }
     }
 
-    fn invalidate(&self, key: &Arg<'_>) {
-        self.cache.lock().unwrap().remove(key.as_bytes());
+    fn invalidate(&self, key: &[u8]) {
+        self.cache.lock().unwrap().remove(key);
     }
 }
 
@@ -68,99 +70,94 @@ impl<B: Clone> Clone for Backend<B> {
 
 #[async_trait]
 impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
-    async fn get<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Option<Value>> {
+    async fn get<'a, K: Key<'a>>(&self, key: K) -> Result<Option<Value>> {
         let key = key.into();
-        match self.load(&key) {
+        match self.load(&key.unredacted) {
             Some(Entry::Get(v)) => Ok(v),
             _ => {
                 let v = self.inner.get(&key).await?;
-                self.store(key, Entry::Get(v.clone()));
+                self.store(key.unredacted, Entry::Get(v.clone()));
                 Ok(v)
             }
         }
     }
 
-    async fn set<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+    async fn set<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let key = key.into();
         let r = self.inner.set(&key, value).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn set_eq<'a, 'b, 'c, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(
-        &self,
-        key: K,
-        value: V,
-        old_value: OV,
-    ) -> Result<bool> {
+    async fn set_eq<'a, 'b, 'c, K: Key<'a>, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(&self, key: K, value: V, old_value: OV) -> Result<bool> {
         let key = key.into();
         let r = self.inner.set_eq(&key, value, old_value).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn set_nx<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
+    async fn set_nx<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
         let key = key.into();
         let r = self.inner.set_nx(&key, value).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn delete<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<bool> {
+    async fn delete<'a, K: Key<'a>>(&self, key: K) -> Result<bool> {
         let key = key.into();
         let r = self.inner.delete(&key).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn s_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+    async fn s_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let key = key.into();
         let r = self.inner.s_add(&key, value).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn s_members<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<Vec<Value>> {
+    async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
         let key = key.into();
-        match self.load(&key) {
+        match self.load(&key.unredacted) {
             Some(Entry::SMembers(v)) => Ok(v),
             _ => {
                 let v = self.inner.s_members(&key).await?;
-                self.store(key, Entry::SMembers(v.clone()));
+                self.store(key.unredacted, Entry::SMembers(v.clone()));
                 Ok(v)
             }
         }
     }
 
-    async fn n_incr_by<'a, K: Into<Arg<'a>> + Send>(&self, key: K, n: i64) -> Result<i64> {
+    async fn n_incr_by<'a, K: Key<'a>>(&self, key: K, n: i64) -> Result<i64> {
         let key = key.into();
         let r = self.inner.n_incr_by(&key, n).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn h_set<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
+    async fn h_set<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
         &self,
         key: K,
         fields: I,
     ) -> Result<()> {
         let key = key.into();
         let r = self.inner.h_set(&key, fields).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn h_del<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
+    async fn h_del<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
         let key = key.into();
         let r = self.inner.h_del(&key, fields).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn h_get<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
+    async fn h_get<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
         let key = key.into();
         let field = field.into();
-        match self.load(&key) {
+        match self.load(&key.unredacted) {
             Some(Entry::HGet(m)) => {
                 if let Some(v) = m.get(field.as_bytes()) {
                     return Ok(v.clone());
@@ -170,7 +167,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
             _ => {}
         }
         let v = self.inner.h_get(&key, &field).await?;
-        self.update(key, |entry| match entry {
+        self.update(key.unredacted, |entry| match entry {
             Entry::HGetAll(_) => {}
             Entry::HGet(m) => {
                 m.insert(field.into_vec(), v.clone());
@@ -184,80 +181,74 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         Ok(v)
     }
 
-    async fn h_get_all<'a, K: Into<Arg<'a>> + Send>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
+    async fn h_get_all<'a, K: Key<'a>>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
         let key = key.into();
-        match self.load(&key) {
+        match self.load(&key.unredacted) {
             Some(Entry::HGetAll(v)) => Ok(v),
             _ => {
                 let v = self.inner.h_get_all(&key).await?;
-                self.store(key, Entry::HGetAll(v.clone()));
+                self.store(key.unredacted, Entry::HGetAll(v.clone()));
                 Ok(v)
             }
         }
     }
 
-    async fn z_add<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
+    async fn z_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
         let key = key.into();
         let r = self.inner.z_add(&key, value, score).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn z_rem<'a, 'b, K: Into<Arg<'a>> + Send, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+    async fn z_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let key = key.into();
         let r = self.inner.z_rem(&key, value).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn z_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+    async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         let key = key.into();
         let r = self.inner.z_count(&key, min, max).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn z_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+    async fn z_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.inner.z_range_by_score(key, min, max, limit).await
     }
 
-    async fn z_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+    async fn z_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.inner.z_rev_range_by_score(key, min, max, limit).await
     }
 
-    async fn zh_add<'a, 'b, 'c, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
-        &self,
-        key: K,
-        field: F,
-        value: V,
-        score: f64,
-    ) -> Result<()> {
+    async fn zh_add<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(&self, key: K, field: F, value: V, score: f64) -> Result<()> {
         let key = key.into();
         let r = self.inner.zh_add(&key, field, value, score).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn zh_count<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64) -> Result<usize> {
+    async fn zh_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         self.inner.zh_count(key, min, max).await
     }
 
-    async fn zh_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+    async fn zh_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.inner.zh_range_by_score(key, min, max, limit).await
     }
 
-    async fn zh_rev_range_by_score<'a, K: Into<Arg<'a>> + Send>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
+    async fn zh_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.inner.zh_rev_range_by_score(key, min, max, limit).await
     }
 
-    async fn zh_rem<'a, 'b, K: Into<Arg<'a>> + Send, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
+    async fn zh_rem<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
         let key = key.into();
         let r = self.inner.zh_rem(&key, field).await;
-        self.invalidate(&key);
+        self.invalidate(key.unredacted.as_bytes());
         r
     }
 
-    async fn z_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+    async fn z_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
         min: Bound<M>,
@@ -267,7 +258,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         self.inner.z_range_by_lex(key, min, max, limit).await
     }
 
-    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Into<Arg<'a>> + Send, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
+    async fn z_rev_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
         min: Bound<M>,
@@ -277,33 +268,37 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         self.inner.z_rev_range_by_lex(key, min, max, limit).await
     }
 
-    async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
-        let mut misses = BatchOperation::new();
+    async fn exec_batch(&self, mut op: BatchOperation<'_>) -> Result<()> {
         let mut gets = HashMap::new();
 
-        for op in op.ops {
-            match op {
-                BatchSubOperation::Get(key, tx) => match self.load(&key) {
+        // Filter ops down to misses.
+        {
+            let cache = self.cache.lock().unwrap();
+            op.ops.retain_mut(|op| match op {
+                BatchSubOperation::Get(key, tx) => match cache.get(key.unredacted.as_bytes()).cloned() {
                     Some(Entry::Get(v)) => {
                         if let Some(v) = v {
                             match tx.try_send(v) {
                                 Ok(_) => {}
                                 Err(mpsc::TrySendError::Disconnected(_)) => {}
-                                Err(e) => return Err(e.into()),
+                                Err(mpsc::TrySendError::Full(_)) => panic!("tx should not be full"),
                             }
                         }
+                        false
                     }
                     _ => {
-                        gets.insert(key.to_vec(), (misses.get(key), tx));
+                        let (inner, inner_tx) = GetResult::new();
+                        gets.insert(key.unredacted.to_vec(), (inner, std::mem::replace(tx, inner_tx)));
+                        true
                     }
                 },
-            }
+            });
         }
 
-        if misses.ops.is_empty() {
+        if op.ops.is_empty() {
             Ok(())
         } else {
-            match self.inner.exec_batch(misses).await {
+            match self.inner.exec_batch(op).await {
                 Ok(_) => {
                     for (key, (result, tx)) in gets {
                         let v = result.value();
@@ -343,12 +338,16 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
                     AtomicWriteSubOperation::HSetNX(key, _, _, _) => key,
                     AtomicWriteSubOperation::HDel(key, _) => key,
                 }
+                .unredacted
                 .clone(),
             );
         }
         let r = self.inner.exec_atomic_write(op).await;
+
+        // Invalidate in a single lock operation.
+        let mut cache = self.cache.lock().unwrap();
         for key in keys {
-            self.invalidate(&key);
+            cache.remove(key.as_bytes());
         }
         r
     }
