@@ -742,7 +742,7 @@ impl super::Backend for Backend {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, fields(consumed_wcu, error.message, otel.status_code, otel.kind = "client"))]
+    #[tracing::instrument(skip_all, fields(consumed_wcu, error.msg, otel.status_code, otel.kind = "client"))]
     async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {
         let mut token = Vec::new();
         token.resize(20, 0u8);
@@ -763,7 +763,7 @@ impl super::Backend for Backend {
             .into_iter()
             .map(|op| match op {
                 AtomicWriteSubOperation::Set(key, value) => {
-                    let span = info_span!("set", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("set", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
@@ -779,7 +779,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::SetEQ(key, value, old_value, tx) => {
-                    let span = info_span!("set_eq", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("set_eq", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
@@ -797,7 +797,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::SetNX(key, value, tx) => {
-                    let span = info_span!("set_nx", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("set_nx", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
@@ -814,7 +814,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::Delete(key) => {
-                    let span = info_span!("delete", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("delete", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(&key, NO_SORT_KEY);
@@ -830,7 +830,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::DeleteXX(key, tx) => {
-                    let span = info_span!("delete_xx", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("delete_xx", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(&key, NO_SORT_KEY);
@@ -847,7 +847,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::SAdd(key, value) => {
-                    let span = info_span!("s_add", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("s_add", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut v = AttributeValue::default();
                     v.bs = Some(vec![bytes::Bytes::copy_from_slice(value.as_bytes())]);
                     let mut update = Update::default();
@@ -867,7 +867,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::SRem(key, value) => {
-                    let span = info_span!("s_rem", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("s_rem", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut v = AttributeValue::default();
                     v.bs = Some(vec![bytes::Bytes::copy_from_slice(value.as_bytes())]);
                     let mut update = Update::default();
@@ -887,7 +887,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::ZAdd(key, value, score) => {
-                    let span = info_span!("z_add", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("z_add", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(
@@ -910,7 +910,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::ZHAdd(key, field, value, score) => {
-                    let span = info_span!("zh_add", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("zh_add", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(
@@ -933,7 +933,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::ZRem(key, value) => {
-                    let span = info_span!("z_rem", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("z_rem", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(&key, value);
@@ -949,7 +949,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::ZHRem(key, field) => {
-                    let span = info_span!("zh_rem", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("zh_rem", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(&key, field);
@@ -965,7 +965,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::HSet(key, fields) => {
-                    let span = info_span!("h_set", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("h_set", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
                         .into_iter()
                         .enumerate()
@@ -993,7 +993,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::HSetNX(key, field, value, tx) => {
-                    let span = info_span!("h_set_nx", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("h_set_nx", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let mut update = Update::default();
                     update.table_name = self.table_name.clone();
                     update.key = composite_key(&key, NO_SORT_KEY);
@@ -1015,7 +1015,7 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::HDel(key, fields) => {
-                    let span = info_span!("h_del", ?key, error.message = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!("h_del", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
                     let names: HashMap<_, _> = fields
                         .into_iter()
                         .enumerate()
@@ -1050,7 +1050,7 @@ impl super::Backend for Backend {
                     };
                     let state = &states[i];
                     state.span.record("otel.status_code", "ERROR");
-                    state.span.record("error.message", &code);
+                    state.span.record("error.msg", &code);
                     println!("code for {i} is {code:?}");
                     match code {
                         "ConditionalCheckFailed" => {
@@ -1069,13 +1069,13 @@ impl super::Backend for Backend {
                 }
                 let span = Span::current();
                 span.record("otel.status_code", "ERROR");
-                span.record("error.message", "transaction canceled");
+                span.record("error.msg", "transaction canceled");
                 return err.map(Err).unwrap_or(Ok(false));
             }
             Err(e) => {
                 let span = Span::current();
                 span.record("otel.status_code", "ERROR");
-                span.record("error.message", tracing::field::display(&e));
+                span.record("error.msg", tracing::field::display(&e));
                 Err(e.into())
             }
             Ok(r) => {
