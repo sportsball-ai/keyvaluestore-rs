@@ -1051,7 +1051,6 @@ impl super::Backend for Backend {
                     let state = &states[i];
                     state.span.record("otel.status_code", "ERROR");
                     state.span.record("error.msg", &code);
-                    println!("code for {i} is {code:?}");
                     match code {
                         "ConditionalCheckFailed" => {
                             if let Some(ref tx) = state.failure_tx {
