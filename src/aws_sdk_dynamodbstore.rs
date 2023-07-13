@@ -30,14 +30,14 @@ fn new_item<'h, 's, S: Into<Arg<'s>> + Send, A: IntoIterator<Item = (&'static st
     attrs: A,
 ) -> HashMap<String, AttributeValue> {
     let mut ret: HashMap<_, _> = attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    ret.insert("hk".to_string(), attribute_value(Arg::Borrowed(hash.unredacted.as_bytes())));
+    ret.insert("hk".to_string(), attribute_value(hash.unredacted.as_bytes()));
     ret.insert("rk".to_string(), attribute_value(sort));
     ret
 }
 
 fn composite_key<'h, 's, S: Into<Arg<'s>> + Send>(hash: &ExplicitKey<'h>, sort: S) -> HashMap<String, AttributeValue> {
     let mut ret = HashMap::new();
-    ret.insert("hk".to_string(), attribute_value(Arg::Borrowed(hash.unredacted.as_bytes())));
+    ret.insert("hk".to_string(), attribute_value(hash.unredacted.as_bytes()));
     ret.insert("rk".to_string(), attribute_value(sort));
     ret
 }
