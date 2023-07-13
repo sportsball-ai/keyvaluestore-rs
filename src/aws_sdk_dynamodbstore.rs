@@ -25,19 +25,19 @@ pub struct Backend {
 const NO_SORT_KEY: &str = "_";
 
 fn new_item<'h, 's, S: Into<Arg<'s>> + Send, A: IntoIterator<Item = (&'static str, AttributeValue)>>(
-    hash: ExplicitKey<'h>,
+    hash: &ExplicitKey<'h>,
     sort: S,
     attrs: A,
 ) -> HashMap<String, AttributeValue> {
     let mut ret: HashMap<_, _> = attrs.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-    ret.insert("hk".to_string(), attribute_value(hash.unredacted));
+    ret.insert("hk".to_string(), attribute_value(hash.unredacted.as_bytes()));
     ret.insert("rk".to_string(), attribute_value(sort));
     ret
 }
 
-fn composite_key<'h, 's, S: Into<Arg<'s>> + Send>(hash: ExplicitKey<'h>, sort: S) -> HashMap<String, AttributeValue> {
+fn composite_key<'h, 's, S: Into<Arg<'s>> + Send>(hash: &ExplicitKey<'h>, sort: S) -> HashMap<String, AttributeValue> {
     let mut ret = HashMap::new();
-    ret.insert("hk".to_string(), attribute_value(hash.unredacted));
+    ret.insert("hk".to_string(), attribute_value(hash.unredacted.as_bytes()));
     ret.insert("rk".to_string(), attribute_value(sort));
     ret
 }
@@ -262,7 +262,7 @@ impl super::Backend for Backend {
             .client
             .get_item()
             .consistent_read(!self.allow_eventually_consistent_reads)
-            .set_key(Some(composite_key(key.into(), NO_SORT_KEY)))
+            .set_key(Some(composite_key(&key.into(), NO_SORT_KEY)))
             .table_name(self.table_name.clone())
             .send()
             .await?;
@@ -276,7 +276,7 @@ impl super::Backend for Backend {
         self.client
             .put_item()
             .table_name(self.table_name.clone())
-            .set_item(Some(new_item(key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))])))
+            .set_item(Some(new_item(&key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))])))
             .send()
             .await?;
         Ok(())
@@ -287,7 +287,7 @@ impl super::Backend for Backend {
             .client
             .put_item()
             .table_name(self.table_name.clone())
-            .set_item(Some(new_item(key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))])))
+            .set_item(Some(new_item(&key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))])))
             .condition_expression("v = :v")
             .expression_attribute_values(":v", attribute_value(old_value))
             .send()
@@ -308,7 +308,7 @@ impl super::Backend for Backend {
             .client
             .put_item()
             .table_name(self.table_name.clone())
-            .set_item(Some(new_item(key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))])))
+            .set_item(Some(new_item(&key.into(), NO_SORT_KEY, vec![("v", attribute_value(value))])))
             .condition_expression("attribute_not_exists(v)")
             .send()
             .await
@@ -328,7 +328,7 @@ impl super::Backend for Backend {
             .client
             .delete_item()
             .table_name(self.table_name.clone())
-            .set_key(Some(composite_key(key.into(), NO_SORT_KEY)))
+            .set_key(Some(composite_key(&key.into(), NO_SORT_KEY)))
             .return_values(ReturnValue::AllOld)
             .send()
             .await?;
@@ -340,7 +340,7 @@ impl super::Backend for Backend {
         let v = AttributeValue::Bs(vec![Blob::new(value.into_vec())]);
         self.client
             .update_item()
-            .set_key(Some(composite_key(key.into(), NO_SORT_KEY)))
+            .set_key(Some(composite_key(&key.into(), NO_SORT_KEY)))
             .table_name(self.table_name.clone())
             .update_expression("ADD v :v")
             .expression_attribute_values(":v", v)
@@ -354,7 +354,7 @@ impl super::Backend for Backend {
             .client
             .get_item()
             .consistent_read(!self.allow_eventually_consistent_reads)
-            .set_key(Some(composite_key(key.into(), NO_SORT_KEY)))
+            .set_key(Some(composite_key(&key.into(), NO_SORT_KEY)))
             .table_name(self.table_name.clone())
             .send()
             .await?;
@@ -372,7 +372,7 @@ impl super::Backend for Backend {
         let output = self
             .client
             .update_item()
-            .set_key(Some(composite_key(key.into(), NO_SORT_KEY)))
+            .set_key(Some(composite_key(&key.into(), NO_SORT_KEY)))
             .table_name(self.table_name.clone())
             .update_expression("ADD v :n")
             .expression_attribute_values(":n", AttributeValue::N(n.to_string()))
@@ -405,7 +405,7 @@ impl super::Backend for Backend {
             .unzip();
         self.client
             .update_item()
-            .set_key(Some(composite_key(key.into(), NO_SORT_KEY)))
+            .set_key(Some(composite_key(&key.into(), NO_SORT_KEY)))
             .table_name(self.table_name.clone())
             .update_expression(format!(
                 "SET {}",
@@ -426,7 +426,7 @@ impl super::Backend for Backend {
             .collect();
         self.client
             .update_item()
-            .set_key(Some(composite_key(key.into(), NO_SORT_KEY)))
+            .set_key(Some(composite_key(&key.into(), NO_SORT_KEY)))
             .table_name(self.table_name.clone())
             .update_expression(format!(
                 "REMOVE {}",
@@ -443,7 +443,7 @@ impl super::Backend for Backend {
             .client
             .get_item()
             .consistent_read(!self.allow_eventually_consistent_reads)
-            .set_key(Some(composite_key(key.into(), NO_SORT_KEY)))
+            .set_key(Some(composite_key(&key.into(), NO_SORT_KEY)))
             .table_name(self.table_name.clone())
             .send()
             .await?;
@@ -461,7 +461,7 @@ impl super::Backend for Backend {
             .client
             .get_item()
             .consistent_read(!self.allow_eventually_consistent_reads)
-            .set_key(Some(composite_key(key.into(), NO_SORT_KEY)))
+            .set_key(Some(composite_key(&key.into(), NO_SORT_KEY)))
             .table_name(self.table_name.clone())
             .send()
             .await?;
@@ -492,7 +492,7 @@ impl super::Backend for Backend {
             .put_item()
             .table_name(self.table_name.clone())
             .set_item(Some(new_item(
-                key.into(),
+                &key.into(),
                 &field,
                 vec![
                     ("v", attribute_value(&value)),
@@ -508,7 +508,7 @@ impl super::Backend for Backend {
         self.client
             .delete_item()
             .table_name(self.table_name.clone())
-            .set_key(Some(composite_key(key.into(), field)))
+            .set_key(Some(composite_key(&key.into(), field)))
             .send()
             .await?;
         Ok(())
@@ -603,7 +603,7 @@ impl super::Backend for Backend {
             .ops
             .iter()
             .map(|op| match op {
-                BatchSubOperation::Get(key, _) => composite_key(key.clone(), NO_SORT_KEY),
+                BatchSubOperation::Get(key, _) => composite_key(&key, NO_SORT_KEY),
             })
             .collect();
 
@@ -666,7 +666,12 @@ impl super::Backend for Backend {
         rand::thread_rng().fill_bytes(&mut token);
         let token = base64::encode_config(token, base64::URL_SAFE_NO_PAD);
 
-        let (transact_items, failure_txs): (Vec<_>, Vec<_>) = op
+        struct SubOpState {
+            key: ExplicitKey<'static>,
+            failure_tx: Option<mpsc::SyncSender<bool>>,
+        }
+
+        let (transact_items, states): (Vec<_>, Vec<_>) = op
             .ops
             .into_iter()
             .map(|op| match op {
@@ -675,59 +680,89 @@ impl super::Backend for Backend {
                         .put(
                             Put::builder()
                                 .table_name(self.table_name.clone())
-                                .set_item(Some(new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+                                .set_item(Some(new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::SetEQ(key, value, old_value, tx) => {
                     let item = TransactWriteItem::builder()
                         .put(
                             Put::builder()
                                 .table_name(self.table_name.clone())
-                                .set_item(Some(new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+                                .set_item(Some(new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
                                 .condition_expression("v = :v")
                                 .expression_attribute_values(":v", attribute_value(old_value))
                                 .build(),
                         )
                         .build();
-                    (item, Some(tx))
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: Some(tx),
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::SetNX(key, value, tx) => {
                     let item = TransactWriteItem::builder()
                         .put(
                             Put::builder()
                                 .table_name(self.table_name.clone())
-                                .set_item(Some(new_item(key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+                                .set_item(Some(new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
                                 .condition_expression("attribute_not_exists(v)")
                                 .build(),
                         )
                         .build();
-                    (item, Some(tx))
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: Some(tx),
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::Delete(key) => {
                     let item = TransactWriteItem::builder()
                         .delete(
                             Delete::builder()
                                 .table_name(self.table_name.clone())
-                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::DeleteXX(key, tx) => {
                     let item = TransactWriteItem::builder()
                         .delete(
                             Delete::builder()
                                 .table_name(self.table_name.clone())
-                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .condition_expression("attribute_exists(v)")
                                 .build(),
                         )
                         .build();
-                    (item, Some(tx))
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: Some(tx),
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::SAdd(key, value) => {
                     let v = AttributeValue::Bs(vec![Blob::new(value.into_vec())]);
@@ -735,13 +770,19 @@ impl super::Backend for Backend {
                         .update(
                             Update::builder()
                                 .table_name(self.table_name.clone())
-                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .update_expression("ADD v :v")
                                 .expression_attribute_values(":v", v)
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::SRem(key, value) => {
                     let v = AttributeValue::Bs(vec![Blob::new(value.into_vec())]);
@@ -749,13 +790,19 @@ impl super::Backend for Backend {
                         .update(
                             Update::builder()
                                 .table_name(self.table_name.clone())
-                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .update_expression("DELETE v :v")
                                 .expression_attribute_values(":v", v)
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::ZAdd(key, value, score) => {
                     let item = TransactWriteItem::builder()
@@ -763,7 +810,7 @@ impl super::Backend for Backend {
                             Put::builder()
                                 .table_name(self.table_name.clone())
                                 .set_item(Some(new_item(
-                                    key,
+                                    &key,
                                     &value,
                                     vec![
                                         ("v", attribute_value(&value)),
@@ -773,7 +820,13 @@ impl super::Backend for Backend {
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::ZHAdd(key, field, value, score) => {
                     let item = TransactWriteItem::builder()
@@ -781,7 +834,7 @@ impl super::Backend for Backend {
                             Put::builder()
                                 .table_name(self.table_name.clone())
                                 .set_item(Some(new_item(
-                                    key,
+                                    &key,
                                     &field,
                                     vec![
                                         ("v", attribute_value(&value)),
@@ -791,29 +844,47 @@ impl super::Backend for Backend {
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::ZRem(key, value) => {
                     let item = TransactWriteItem::builder()
                         .delete(
                             Delete::builder()
                                 .table_name(self.table_name.clone())
-                                .set_key(Some(composite_key(key, value)))
+                                .set_key(Some(composite_key(&key, value)))
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::ZHRem(key, field) => {
                     let item = TransactWriteItem::builder()
                         .delete(
                             Delete::builder()
                                 .table_name(self.table_name.clone())
-                                .set_key(Some(composite_key(key, field)))
+                                .set_key(Some(composite_key(&key, field)))
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::HSet(key, fields) => {
                     let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
@@ -828,7 +899,7 @@ impl super::Backend for Backend {
                         .update(
                             Update::builder()
                                 .table_name(self.table_name.clone())
-                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .update_expression(format!(
                                     "SET {}",
                                     (0..names.len()).map(|i| format!("#n{} = :n{}", i, i)).collect::<Vec<_>>().join(", ")
@@ -838,7 +909,13 @@ impl super::Backend for Backend {
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::HSetNX(key, field, value, tx) => {
                     let v = AttributeValue::B(Blob::new(value.into_vec()));
@@ -846,7 +923,7 @@ impl super::Backend for Backend {
                         .update(
                             Update::builder()
                                 .table_name(self.table_name.clone())
-                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .condition_expression("attribute_not_exists(#f)")
                                 .update_expression("SET #f = :v")
                                 .expression_attribute_values(":v", v)
@@ -854,7 +931,13 @@ impl super::Backend for Backend {
                                 .build(),
                         )
                         .build();
-                    (item, Some(tx))
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: Some(tx),
+                        },
+                    )
                 }
                 AtomicWriteSubOperation::HDel(key, fields) => {
                     let names: HashMap<_, _> = fields
@@ -865,7 +948,7 @@ impl super::Backend for Backend {
                     let item = TransactWriteItem::builder()
                         .update(
                             Update::builder()
-                                .set_key(Some(composite_key(key, NO_SORT_KEY)))
+                                .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .table_name(self.table_name.clone())
                                 .update_expression(format!(
                                     "REMOVE {}",
@@ -875,7 +958,13 @@ impl super::Backend for Backend {
                                 .build(),
                         )
                         .build();
-                    (item, None)
+                    (
+                        item,
+                        SubOpState {
+                            key: key.into_owned(),
+                            failure_tx: None,
+                        },
+                    )
                 }
             })
             .unzip();
@@ -892,24 +981,28 @@ impl super::Backend for Backend {
                 kind: TransactWriteItemsErrorKind::TransactionCanceledException(cancel),
                 ..
             }) => {
-                let mut did_fail_conditional = false;
+                let mut err = None;
                 for (i, reason) in cancel.cancellation_reasons().unwrap_or(&[]).iter().enumerate() {
-                    if matches!(reason.code(), Some("ConditionalCheckFailed")) {
-                        did_fail_conditional = true;
-                        if let Some(Some(tx)) = failure_txs.get(i) {
-                            match tx.try_send(true) {
-                                Ok(_) => {}
-                                Err(mpsc::TrySendError::Disconnected(_)) => {}
-                                Err(e) => return Err(e.into()),
+                    let Some(code) = reason.code.as_deref() else {
+                        continue;
+                    };
+                    let state = &states[i];
+                    match code {
+                        "ConditionalCheckFailed" => {
+                            if let Some(ref tx) = state.failure_tx {
+                                let _ = tx.try_send(true);
                             }
+                        }
+                        "AtomicWriteConflict" => {
+                            err.get_or_insert_with(|| Error::AtomicWriteConflict(state.key.clone()));
+                        }
+                        "None" => {}
+                        _ => {
+                            err.get_or_insert_with(|| Error::Other(format!("{:?} failed with {}", &state.key, code).into()));
                         }
                     }
                 }
-                if did_fail_conditional {
-                    Ok(false)
-                } else {
-                    Err(Error::AtomicWriteConflict)
-                }
+                return err.map(Err).unwrap_or(Ok(false));
             }
             Err(e) => Err(e.into()),
             Ok(_) => Ok(true),

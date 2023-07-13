@@ -33,7 +33,7 @@ pub enum Error {
     // AtomicWriteConflict happens when an atomic write fails due to contention (but not due to a
     // failed conditional). For example, in DynamoDB this error happens when a transaction fails
     // due to a TransactionConflict.
-    AtomicWriteConflict,
+    AtomicWriteConflict(ExplicitKey<'static>),
     Other(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
@@ -46,7 +46,7 @@ impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AtomicWriteConflict => write!(f, "atomic write conflict"),
+            Self::AtomicWriteConflict(key) => write!(f, "atomic write conflict on {:?}", key),
             Self::Other(e) => e.fmt(f),
         }
     }
@@ -90,6 +90,15 @@ impl From<&'static str> for ExplicitKey<'static> {
 pub struct ExplicitKey<'a> {
     pub redacted: Arg<'a>,
     pub unredacted: Arg<'a>,
+}
+
+impl ExplicitKey<'_> {
+    pub fn into_owned(self) -> ExplicitKey<'static> {
+        ExplicitKey {
+            redacted: Arg::Owned(self.redacted.into_vec()),
+            unredacted: Arg::Owned(self.unredacted.into_vec()),
+        }
+    }
 }
 
 impl<'a> PartialEq for ExplicitKey<'a> {
