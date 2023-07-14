@@ -988,15 +988,15 @@ impl super::Backend for Backend {
                     };
                     let state = &states[i];
                     match code {
+                        "None" => continue,
                         "ConditionalCheckFailed" => {
                             if let Some(ref tx) = state.failure_tx {
                                 let _ = tx.try_send(true);
                             }
                         }
-                        "AtomicWriteConflict" => {
+                        "TransactionConflict" => {
                             err.get_or_insert_with(|| Error::AtomicWriteConflict(state.key.clone()));
                         }
-                        "None" => {}
                         _ => {
                             err.get_or_insert_with(|| Error::Other(format!("{:?} failed with {}", &state.key, code).into()));
                         }
