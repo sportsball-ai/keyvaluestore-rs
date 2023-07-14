@@ -1176,7 +1176,7 @@ impl super::Backend for Backend {
                                 let _ = tx.try_send(true);
                             }
                         }
-                        "AtomicWriteConflict" => {
+                        "TransactionConflict" => {
                             err.get_or_insert_with(|| Error::AtomicWriteConflict(state.key.clone()));
                         }
                         _ => {
