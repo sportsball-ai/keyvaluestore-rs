@@ -14,6 +14,36 @@ use std::{
 };
 use tracing::{field::Empty, info_span, Span};
 
+fn add_err_to_span(e: &(dyn std::error::Error + Sync + Send + 'static)) {
+    let span = Span::current();
+    span.record("otel.status_code", "ERROR");
+    span.record("err.msg", e);
+}
+
+trait ErrExt {
+    fn spanify(self) -> Self;
+}
+
+impl<E: std::error::Error + Sync + Send + 'static> ErrExt for E {
+    fn spanify(self) -> Self {
+        add_err_to_span(&self);
+        self
+    }
+}
+
+trait ResultExt {
+    fn spanify_err(self) -> Self;
+}
+
+impl<T, E: std::error::Error + Sync + Send + 'static> ResultExt for std::result::Result<T, E> {
+    fn spanify_err(self) -> Self {
+        if let Err(ref e) = self {
+            add_err_to_span(e);
+        }
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct Backend {
     pub allow_eventually_consistent_reads: bool,
@@ -209,7 +239,7 @@ impl Backend {
             if limit > 0 {
                 q.limit = Some((limit - members.len() + 1) as _);
             }
-            let result = self.client.query(q).await?;
+            let result = self.client.query(q).await.spanify_err()?;
             if let Some(c) = result.consumed_capacity {
                 cap.add(&c);
             }
@@ -285,7 +315,7 @@ impl Backend {
             ],
         );
         put.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.put_item(put).await?;
+        let result = self.client.put_item(put).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(())
     }
@@ -297,7 +327,7 @@ impl Backend {
         delete.table_name = self.table_name.clone();
         delete.key = composite_key(&key, field);
         delete.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.delete_item(delete).await?;
+        let result = self.client.delete_item(delete).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(())
     }
@@ -325,7 +355,7 @@ impl Backend {
         let mut cap = TotalConsumedCapacity::default();
 
         loop {
-            let result = self.client.query(query.clone()).await?;
+            let result = self.client.query(query.clone()).await.spanify_err()?;
             if let Some(n) = result.count {
                 count += n as usize;
             }
@@ -345,7 +375,7 @@ impl Backend {
 
 #[async_trait]
 impl super::Backend for Backend {
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn get<'a, K: Key<'a>>(&self, key: K) -> Result<Option<Value>> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -355,12 +385,12 @@ impl super::Backend for Backend {
         get.key = composite_key(&key, NO_SORT_KEY);
         get.table_name = self.table_name.clone();
         get.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.get_item(get).await?;
+        let result = self.client.get_item(get).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(result.item.and_then(|mut item| item.remove("v")).and_then(|v| v.b).map(|v| v.to_vec().into()))
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn set<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -369,12 +399,12 @@ impl super::Backend for Backend {
         put.table_name = self.table_name.clone();
         put.item = new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
         put.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.put_item(put).await?;
+        let result = self.client.put_item(put).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn set_eq<'a, 'b, 'c, K: Key<'a>, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(&self, key: K, value: V, old_value: OV) -> Result<bool> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -395,7 +425,7 @@ impl super::Backend for Backend {
         }
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn set_nx<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<bool> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -411,11 +441,11 @@ impl super::Backend for Backend {
                 Ok(true)
             }
             Err(RusotoError::Service(rusoto_dynamodb::PutItemError::ConditionalCheckFailed(_))) => Ok(false),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e.spanify().into()),
         }
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn delete<'a, K: Key<'a>>(&self, key: K) -> Result<bool> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -425,12 +455,12 @@ impl super::Backend for Backend {
         delete.key = composite_key(&key, NO_SORT_KEY);
         delete.return_values = Some("ALL_OLD".to_string());
         delete.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.delete_item(delete).await?;
+        let result = self.client.delete_item(delete).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(result.attributes.is_some())
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn s_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -444,12 +474,12 @@ impl super::Backend for Backend {
         update.update_expression = Some("ADD v :v".to_string());
         update.expression_attribute_values = Some(vec![(":v".to_string(), v)].into_iter().collect());
         update.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.update_item(update).await?;
+        let result = self.client.update_item(update).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -459,7 +489,7 @@ impl super::Backend for Backend {
         get.key = composite_key(&key, NO_SORT_KEY);
         get.table_name = self.table_name.clone();
         get.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.get_item(get).await?;
+        let result = self.client.get_item(get).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(result
             .item
@@ -469,7 +499,7 @@ impl super::Backend for Backend {
             .unwrap_or(vec![]))
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn n_incr_by<'a, K: Key<'a>>(&self, key: K, n: i64) -> Result<i64> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -483,16 +513,16 @@ impl super::Backend for Backend {
         update.expression_attribute_values = Some(vec![(":n".to_string(), v)].into_iter().collect());
         update.return_values = Some("ALL_NEW".to_string());
         update.return_consumed_capacity = Some("TOTAL".to_owned());
-        let output = self.client.update_item(update).await?;
+        let output = self.client.update_item(update).await.spanify_err()?;
         record_cap(&output.consumed_capacity, &span);
         let new_value = match output.attributes.and_then(|mut h| h.remove("v")).and_then(|v| v.n) {
             Some(v) => v,
-            None => return Err(SimpleError::new("new value not returned by dynamodb").into()),
+            None => return Err(SimpleError::new("new value not returned by dynamodb").spanify().into()),
         };
-        Ok(new_value.parse()?)
+        Ok(new_value.parse().spanify_err()?)
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status, error.msg, otel.span_kind = "client"))]
     async fn h_set<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send, I: IntoIterator<Item = (F, V)> + Send>(
         &self,
         key: K,
@@ -520,12 +550,12 @@ impl super::Backend for Backend {
         update.expression_attribute_values = Some(values);
         update.expression_attribute_names = Some(names);
         update.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.update_item(update).await?;
+        let result = self.client.update_item(update).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn h_del<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(&self, key: K, fields: I) -> Result<()> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -544,12 +574,12 @@ impl super::Backend for Backend {
         ));
         update.expression_attribute_names = Some(names);
         update.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.update_item(update).await?;
+        let result = self.client.update_item(update).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status, error.msg, otel.span_kind = "client"))]
     async fn h_get<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -559,7 +589,7 @@ impl super::Backend for Backend {
         get.key = composite_key(&key, NO_SORT_KEY);
         get.table_name = self.table_name.clone();
         get.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.get_item(get).await?;
+        let result = self.client.get_item(get).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(result
             .item
@@ -568,7 +598,7 @@ impl super::Backend for Backend {
             .map(|v| v.to_vec().into()))
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn h_get_all<'a, K: Key<'a>>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -578,7 +608,7 @@ impl super::Backend for Backend {
         get.key = composite_key(&key, NO_SORT_KEY);
         get.table_name = self.table_name.clone();
         get.return_consumed_capacity = Some("TOTAL".to_owned());
-        let result = self.client.get_item(get).await?;
+        let result = self.client.get_item(get).await.spanify_err()?;
         record_cap(&result.consumed_capacity, &span);
         Ok(result
             .item
@@ -590,62 +620,62 @@ impl super::Backend for Backend {
             .unwrap_or(HashMap::new()))
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
         let v = value.into();
         self.zh_add_impl(key.into(), &v, &v, score).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_add<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(&self, key: K, field: F, value: V, score: f64) -> Result<()> {
         self.zh_add_impl(key.into(), field, value, score).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_rem<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
         self.zh_rem_impl(key.into(), field).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         self.zh_rem_impl(key.into(), value).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         self.zh_count_impl(key.into(), min, max).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         self.zh_count_impl(key.into(), min, max).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.zh_range_impl(key.into(), min.into(), max.into(), limit, false, true).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.zh_range_impl(key.into(), min.into(), max.into(), limit, false, true).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.zh_range_impl(key.into(), min.into(), max.into(), limit, true, true).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.zh_range_impl(key.into(), min.into(), max.into(), limit, true, true).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
@@ -657,7 +687,7 @@ impl super::Backend for Backend {
         self.zh_range_impl(key.into(), min, max, limit, false, true).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_rev_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
@@ -669,7 +699,7 @@ impl super::Backend for Backend {
         self.zh_range_impl(key.into(), min, max, limit, true, true).await
     }
 
-    #[tracing::instrument(skip_all, err(Display), fields(consumed_rcu))]
+    #[tracing::instrument(skip_all, fields(consumed_rcu, error.msg, otel.status_code, otel.span_kind = "client"))]
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
         if op.ops.is_empty() {
             return Ok(());
@@ -710,7 +740,7 @@ impl super::Backend for Backend {
             keys_and_attributes.keys = batch;
             get.request_items.insert(self.table_name.clone(), keys_and_attributes);
             get.return_consumed_capacity = Some("TOTAL".to_owned());
-            let result = self.client.batch_get_item(get).await?;
+            let result = self.client.batch_get_item(get).await.spanify_err()?;
             for c in result.consumed_capacity.iter().flatten() {
                 cap.add(&c);
             }
@@ -718,16 +748,8 @@ impl super::Backend for Backend {
             if let Some(items) = result.responses.and_then(|mut r| r.remove(&self.table_name)) {
                 for mut item in items {
                     if let Some(v) = item.remove("v").and_then(|v| v.b).map(|b| b.to_vec().into()) {
-                        match item
-                            .remove("hk")
-                            .and_then(|hk| hk.b)
-                            .and_then(|b| ops.remove(&b as &[u8]))
-                            .map(|op| op.tx.try_send(v))
-                        {
-                            Some(Ok(_)) => {}
-                            Some(Err(mpsc::TrySendError::Disconnected(_))) => {}
-                            Some(Err(e)) => return Err(e.into()),
-                            None => {}
+                        if let Some(op) = item.remove("hk").and_then(|hk| hk.b).and_then(|b| ops.remove(&b as &[u8])) {
+                            let _ = op.tx.try_send(v);
                         }
                     }
                 }
@@ -763,7 +785,14 @@ impl super::Backend for Backend {
             .into_iter()
             .map(|op| match op {
                 AtomicWriteSubOperation::Set(key, value) => {
-                    let span = info_span!("set", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "set",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
@@ -779,7 +808,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::SetEQ(key, value, old_value, tx) => {
-                    let span = info_span!("set_eq", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "set_eq",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
@@ -797,7 +833,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::SetNX(key, value, tx) => {
-                    let span = info_span!("set_nx", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "set_nx",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
@@ -814,7 +857,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::Delete(key) => {
-                    let span = info_span!("delete", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "delete",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(&key, NO_SORT_KEY);
@@ -830,7 +880,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::DeleteXX(key, tx) => {
-                    let span = info_span!("delete_xx", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "delete_xx",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(&key, NO_SORT_KEY);
@@ -847,7 +904,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::SAdd(key, value) => {
-                    let span = info_span!("s_add", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "s_add",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut v = AttributeValue::default();
                     v.bs = Some(vec![bytes::Bytes::copy_from_slice(value.as_bytes())]);
                     let mut update = Update::default();
@@ -867,7 +931,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::SRem(key, value) => {
-                    let span = info_span!("s_rem", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "s_rem",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut v = AttributeValue::default();
                     v.bs = Some(vec![bytes::Bytes::copy_from_slice(value.as_bytes())]);
                     let mut update = Update::default();
@@ -887,7 +958,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::ZAdd(key, value, score) => {
-                    let span = info_span!("z_add", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "z_add",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(
@@ -910,7 +988,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::ZHAdd(key, field, value, score) => {
-                    let span = info_span!("zh_add", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "zh_add",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut put = Put::default();
                     put.table_name = self.table_name.clone();
                     put.item = new_item(
@@ -933,7 +1018,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::ZRem(key, value) => {
-                    let span = info_span!("z_rem", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "z_rem",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(&key, value);
@@ -949,7 +1041,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::ZHRem(key, field) => {
-                    let span = info_span!("zh_rem", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "zh_rem",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut delete = Delete::default();
                     delete.table_name = self.table_name.clone();
                     delete.key = composite_key(&key, field);
@@ -965,7 +1064,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::HSet(key, fields) => {
-                    let span = info_span!("h_set", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "h_set",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
                         .into_iter()
                         .enumerate()
@@ -993,7 +1099,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::HSetNX(key, field, value, tx) => {
-                    let span = info_span!("h_set_nx", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "h_set_nx",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let mut update = Update::default();
                     update.table_name = self.table_name.clone();
                     update.key = composite_key(&key, NO_SORT_KEY);
@@ -1015,7 +1128,14 @@ impl super::Backend for Backend {
                     )
                 }
                 AtomicWriteSubOperation::HDel(key, fields) => {
-                    let span = info_span!("h_del", ?key, error.msg = Empty, otel.status_code = Empty, otel.kind = "client");
+                    let span = info_span!(
+                        "h_del",
+                        ?key,
+                        error.code = Empty,
+                        error.msg = Empty,
+                        otel.status_code = Empty,
+                        otel.kind = "client"
+                    );
                     let names: HashMap<_, _> = fields
                         .into_iter()
                         .enumerate()
@@ -1049,9 +1169,8 @@ impl super::Backend for Backend {
                         continue;
                     };
                     let state = &states[i];
-                    state.span.record("otel.status_code", "ERROR");
-                    state.span.record("error.msg", &code);
                     match code {
+                        "None" => continue,
                         "ConditionalCheckFailed" => {
                             if let Some(ref tx) = state.failure_tx {
                                 let _ = tx.try_send(true);
@@ -1060,10 +1179,14 @@ impl super::Backend for Backend {
                         "AtomicWriteConflict" => {
                             err.get_or_insert_with(|| Error::AtomicWriteConflict(state.key.clone()));
                         }
-                        "None" => {}
                         _ => {
                             err.get_or_insert_with(|| Error::Other(format!("{:?} failed with {}", &state.key, code).into()));
                         }
+                    }
+                    state.span.record("otel.status_code", "ERROR");
+                    state.span.record("error.code", &code);
+                    if let Some(msg) = reason.message {
+                        state.span.record("error.msg", msg);
                     }
                 }
                 let span = Span::current();
@@ -1071,12 +1194,7 @@ impl super::Backend for Backend {
                 span.record("error.msg", "transaction canceled");
                 return err.map(Err).unwrap_or(Ok(false));
             }
-            Err(e) => {
-                let span = Span::current();
-                span.record("otel.status_code", "ERROR");
-                span.record("error.msg", tracing::field::display(&e));
-                Err(e.into())
-            }
+            Err(e) => Err(e.spanify().into()),
             Ok(r) => {
                 let mut cap = TotalConsumedCapacity::default();
                 for c in r.consumed_capacity.iter().flatten() {
