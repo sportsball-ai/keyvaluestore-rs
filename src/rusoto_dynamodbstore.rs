@@ -241,7 +241,7 @@ impl Backend {
             }
             let result = self.client.query(q).await.spanify_err()?;
             if let Some(c) = result.consumed_capacity {
-                cap.add(&c);
+                cap.add_as_rcu(&c);
             }
             if let Some(mut items) = result.items {
                 let mut skip = 0;
@@ -316,7 +316,7 @@ impl Backend {
         );
         put.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.put_item(put).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_wcu(&result.consumed_capacity, &span);
         Ok(())
     }
 
@@ -328,7 +328,7 @@ impl Backend {
         delete.key = composite_key(&key, field);
         delete.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.delete_item(delete).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_wcu(&result.consumed_capacity, &span);
         Ok(())
     }
 
@@ -360,7 +360,7 @@ impl Backend {
                 count += n as usize;
             }
             if let Some(c) = result.consumed_capacity {
-                cap.add(&c);
+                cap.add_as_rcu(&c);
             }
             match result.last_evaluated_key {
                 Some(key) => query.exclusive_start_key = Some(key),
@@ -386,7 +386,7 @@ impl super::Backend for Backend {
         get.table_name = self.table_name.clone();
         get.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.get_item(get).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_rcu(&result.consumed_capacity, &span);
         Ok(result.item.and_then(|mut item| item.remove("v")).and_then(|v| v.b).map(|v| v.to_vec().into()))
     }
 
@@ -400,7 +400,7 @@ impl super::Backend for Backend {
         put.item = new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))]);
         put.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.put_item(put).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_wcu(&result.consumed_capacity, &span);
         Ok(())
     }
 
@@ -417,7 +417,7 @@ impl super::Backend for Backend {
         put.return_consumed_capacity = Some("TOTAL".to_owned());
         match self.client.put_item(put).await {
             Ok(result) => {
-                record_cap(&result.consumed_capacity, &span);
+                record_wcu(&result.consumed_capacity, &span);
                 Ok(true)
             }
             Err(RusotoError::Service(rusoto_dynamodb::PutItemError::ConditionalCheckFailed(_))) => Ok(false),
@@ -437,7 +437,7 @@ impl super::Backend for Backend {
         put.return_consumed_capacity = Some("TOTAL".to_owned());
         match self.client.put_item(put).await {
             Ok(result) => {
-                record_cap(&result.consumed_capacity, &span);
+                record_wcu(&result.consumed_capacity, &span);
                 Ok(true)
             }
             Err(RusotoError::Service(rusoto_dynamodb::PutItemError::ConditionalCheckFailed(_))) => Ok(false),
@@ -456,7 +456,7 @@ impl super::Backend for Backend {
         delete.return_values = Some("ALL_OLD".to_string());
         delete.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.delete_item(delete).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_wcu(&result.consumed_capacity, &span);
         Ok(result.attributes.is_some())
     }
 
@@ -475,7 +475,7 @@ impl super::Backend for Backend {
         update.expression_attribute_values = Some(vec![(":v".to_string(), v)].into_iter().collect());
         update.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.update_item(update).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_wcu(&result.consumed_capacity, &span);
         Ok(())
     }
 
@@ -490,7 +490,7 @@ impl super::Backend for Backend {
         get.table_name = self.table_name.clone();
         get.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.get_item(get).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_rcu(&result.consumed_capacity, &span);
         Ok(result
             .item
             .and_then(|mut item| item.remove("v"))
@@ -514,7 +514,7 @@ impl super::Backend for Backend {
         update.return_values = Some("ALL_NEW".to_string());
         update.return_consumed_capacity = Some("TOTAL".to_owned());
         let output = self.client.update_item(update).await.spanify_err()?;
-        record_cap(&output.consumed_capacity, &span);
+        record_wcu(&output.consumed_capacity, &span);
         let new_value = match output.attributes.and_then(|mut h| h.remove("v")).and_then(|v| v.n) {
             Some(v) => v,
             None => return Err(SimpleError::new("new value not returned by dynamodb").spanify().into()),
@@ -551,7 +551,7 @@ impl super::Backend for Backend {
         update.expression_attribute_names = Some(names);
         update.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.update_item(update).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_wcu(&result.consumed_capacity, &span);
         Ok(())
     }
 
@@ -575,7 +575,7 @@ impl super::Backend for Backend {
         update.expression_attribute_names = Some(names);
         update.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.update_item(update).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_wcu(&result.consumed_capacity, &span);
         Ok(())
     }
 
@@ -590,7 +590,7 @@ impl super::Backend for Backend {
         get.table_name = self.table_name.clone();
         get.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.get_item(get).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_rcu(&result.consumed_capacity, &span);
         Ok(result
             .item
             .and_then(|mut item| item.remove(&encode_field_name(field.into().as_bytes())))
@@ -609,7 +609,7 @@ impl super::Backend for Backend {
         get.table_name = self.table_name.clone();
         get.return_consumed_capacity = Some("TOTAL".to_owned());
         let result = self.client.get_item(get).await.spanify_err()?;
-        record_cap(&result.consumed_capacity, &span);
+        record_rcu(&result.consumed_capacity, &span);
         Ok(result
             .item
             .map(|item| {
@@ -742,7 +742,7 @@ impl super::Backend for Backend {
             get.return_consumed_capacity = Some("TOTAL".to_owned());
             let result = self.client.batch_get_item(get).await.spanify_err()?;
             for c in result.consumed_capacity.iter().flatten() {
-                cap.add(&c);
+                cap.add_as_rcu(&c);
             }
 
             if let Some(items) = result.responses.and_then(|mut r| r.remove(&self.table_name)) {
@@ -1198,7 +1198,7 @@ impl super::Backend for Backend {
             Ok(r) => {
                 let mut cap = TotalConsumedCapacity::default();
                 for c in r.consumed_capacity.iter().flatten() {
-                    cap.add(&c);
+                    cap.add_rcu_and_wcu(&c);
                 }
                 cap.record_to(&Span::current());
                 Ok(true)
@@ -1215,12 +1215,21 @@ struct TotalConsumedCapacity {
 }
 
 impl TotalConsumedCapacity {
-    fn add(&mut self, c: &ConsumedCapacity) {
+    /// Adds individually reported RCU and WCU.
+    ///
+    /// This may be just done for `transact_*`.
+    fn add_rcu_and_wcu(&mut self, c: &ConsumedCapacity) {
         if let Some(rcu) = c.read_capacity_units {
             *self.total_rcu.get_or_insert(0.) += rcu;
         }
         if let Some(wcu) = c.write_capacity_units {
             *self.total_wcu.get_or_insert(0.) += wcu;
+        }
+    }
+
+    fn add_as_rcu(&mut self, c: &ConsumedCapacity) {
+        if let Some(rcu) = c.capacity_units {
+            *self.total_rcu.get_or_insert(0.) += rcu;
         }
     }
 
@@ -1236,14 +1245,17 @@ impl TotalConsumedCapacity {
     }
 }
 
-/// Records capacity used by a non-batch operation to the given span.
-fn record_cap(capacity: &Option<ConsumedCapacity>, span: &Span) {
-    let Some(capacity) = capacity else { return };
-    if let Some(rcu) = capacity.read_capacity_units {
-        span.record("consumed_rcu", rcu);
-    }
-    if let Some(wcu) = capacity.write_capacity_units {
+/// Records wcu used by a non-batch write operation to the given span.
+fn record_wcu(capacity: &Option<ConsumedCapacity>, span: &Span) {
+    if let Some(wcu) = capacity.as_ref().and_then(|c| c.capacity_units) {
         span.record("consumed_wcu", wcu);
+    }
+}
+
+/// Records rcu used by a non-batch read operation to the given span.
+fn record_rcu(capacity: &Option<ConsumedCapacity>, span: &Span) {
+    if let Some(rcu) = capacity.as_ref().and_then(|c| c.capacity_units) {
+        span.record("consumed_rcu", rcu);
     }
 }
 
