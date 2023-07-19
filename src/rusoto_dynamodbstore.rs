@@ -17,7 +17,7 @@ use tracing::{field::Empty, info_span, Span};
 fn add_err_to_span(e: &(dyn std::error::Error + Sync + Send + 'static)) {
     let span = Span::current();
     span.record("otel.status_code", "ERROR");
-    span.record("err.msg", e);
+    span.record("error.msg", e);
 }
 
 trait ErrExt {
@@ -375,7 +375,7 @@ impl Backend {
 
 #[async_trait]
 impl super::Backend for Backend {
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn get<'a, K: Key<'a>>(&self, key: K) -> Result<Option<Value>> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -479,7 +479,7 @@ impl super::Backend for Backend {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -579,7 +579,7 @@ impl super::Backend for Backend {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status, error.msg, otel.span_kind = "client"))]
     async fn h_get<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<Option<Value>> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -598,7 +598,7 @@ impl super::Backend for Backend {
             .map(|v| v.to_vec().into()))
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn h_get_all<'a, K: Key<'a>>(&self, key: K) -> Result<HashMap<Vec<u8>, Value>> {
         let key = key.into();
         let span = tracing::Span::current();
@@ -641,41 +641,41 @@ impl super::Backend for Backend {
         self.zh_rem_impl(key.into(), value).await
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         self.zh_count_impl(key.into(), min, max).await
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         self.zh_count_impl(key.into(), min, max).await
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.zh_range_impl(key.into(), min.into(), max.into(), limit, false, true).await
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.zh_range_impl(key.into(), min.into(), max.into(), limit, false, true).await
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.zh_range_impl(key.into(), min.into(), max.into(), limit, true, true).await
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.zh_range_impl(key.into(), min.into(), max.into(), limit, true, true).await
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
@@ -687,7 +687,7 @@ impl super::Backend for Backend {
         self.zh_range_impl(key.into(), min, max, limit, false, true).await
     }
 
-    #[tracing::instrument(skip_all, fields(key, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_rev_range_by_lex<'a, 'b, 'c, K: Key<'a>, M: Into<Arg<'b>> + Send, N: Into<Arg<'c>> + Send>(
         &self,
         key: K,
@@ -699,7 +699,7 @@ impl super::Backend for Backend {
         self.zh_range_impl(key.into(), min, max, limit, true, true).await
     }
 
-    #[tracing::instrument(skip_all, fields(consumed_rcu, error.msg, otel.status_code, otel.span_kind = "client"))]
+    #[tracing::instrument(skip_all, fields(consumed_rcu, consistent = !self.allow_eventually_consistent_reads, error.msg, otel.status_code, otel.span_kind = "client"))]
     async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
         if op.ops.is_empty() {
             return Ok(());
