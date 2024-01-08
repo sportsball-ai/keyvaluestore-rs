@@ -1,16 +1,16 @@
 use crate::ExplicitKey;
 
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Bound, Error, Key, Result, Value};
-use aws_sdk_dynamodb::model::AttributeValue;
 use aws_sdk_dynamodb::{
     client::Client,
-    error::{PutItemError, PutItemErrorKind, TransactWriteItemsError, TransactWriteItemsErrorKind},
-    model::{
-        AttributeDefinition, BillingMode, Delete, KeySchemaElement, KeyType, KeysAndAttributes, LocalSecondaryIndex, Projection, ProjectionType, Put,
-        ReturnValue, ScalarAttributeType, Select, TransactWriteItem, Update,
+    operation::{put_item::PutItemError, transact_write_items::TransactWriteItemsError},
+    primitives::Blob,
+    types::{
+        AttributeDefinition, AttributeValue, BillingMode, Delete, KeySchemaElement, KeyType, KeysAndAttributes, LocalSecondaryIndex, Projection,
+        ProjectionType, Put, ReturnValue, ScalarAttributeType, Select, TransactWriteItem, Update,
     },
-    types::Blob,
 };
+use itertools::Itertools as _;
 use rand::RngCore;
 use simple_error::SimpleError;
 use std::{collections::HashMap, sync::mpsc};
@@ -295,10 +295,7 @@ impl super::Backend for Backend {
             .map_err(|e| e.into_service_error())
         {
             Ok(_) => Ok(true),
-            Err(PutItemError {
-                kind: PutItemErrorKind::ConditionalCheckFailedException(_),
-                ..
-            }) => Ok(false),
+            Err(PutItemError::ConditionalCheckFailedException(_)) => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
@@ -315,10 +312,7 @@ impl super::Backend for Backend {
             .map_err(|e| e.into_service_error())
         {
             Ok(_) => Ok(true),
-            Err(PutItemError {
-                kind: PutItemErrorKind::ConditionalCheckFailedException(_),
-                ..
-            }) => Ok(false),
+            Err(PutItemError::ConditionalCheckFailedException(_)) => Ok(false),
             Err(e) => Err(e.into()),
         }
     }
@@ -622,7 +616,7 @@ impl super::Backend for Backend {
             let keys_and_attributes = KeysAndAttributes::builder()
                 .consistent_read(!self.allow_eventually_consistent_reads)
                 .set_keys(Some(batch))
-                .build();
+                .build()?;
             let result = self
                 .client
                 .batch_get_item()
@@ -652,7 +646,7 @@ impl super::Backend for Backend {
                 }
             }
 
-            if let Some(unprocessed) = result.unprocessed_keys.and_then(|mut k| k.remove(&self.table_name)).and_then(|kv| kv.keys) {
+            if let Some(unprocessed) = result.unprocessed_keys.and_then(|mut k| k.remove(&self.table_name)).map(|kv| kv.keys) {
                 keys.extend(unprocessed);
             }
         }
@@ -681,16 +675,16 @@ impl super::Backend for Backend {
                             Put::builder()
                                 .table_name(self.table_name.clone())
                                 .set_item(Some(new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok::<_, crate::Error>((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::SetEQ(key, value, old_value, tx) => {
                     let item = TransactWriteItem::builder()
@@ -700,16 +694,16 @@ impl super::Backend for Backend {
                                 .set_item(Some(new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
                                 .condition_expression("v = :v")
                                 .expression_attribute_values(":v", attribute_value(old_value))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: Some(tx),
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::SetNX(key, value, tx) => {
                     let item = TransactWriteItem::builder()
@@ -718,16 +712,16 @@ impl super::Backend for Backend {
                                 .table_name(self.table_name.clone())
                                 .set_item(Some(new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
                                 .condition_expression("attribute_not_exists(v)")
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: Some(tx),
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::Delete(key) => {
                     let item = TransactWriteItem::builder()
@@ -735,16 +729,16 @@ impl super::Backend for Backend {
                             Delete::builder()
                                 .table_name(self.table_name.clone())
                                 .set_key(Some(composite_key(&key, NO_SORT_KEY)))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::DeleteXX(key, tx) => {
                     let item = TransactWriteItem::builder()
@@ -753,16 +747,16 @@ impl super::Backend for Backend {
                                 .table_name(self.table_name.clone())
                                 .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .condition_expression("attribute_exists(v)")
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: Some(tx),
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::SAdd(key, value) => {
                     let v = AttributeValue::Bs(vec![Blob::new(value.into_vec())]);
@@ -773,16 +767,16 @@ impl super::Backend for Backend {
                                 .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .update_expression("ADD v :v")
                                 .expression_attribute_values(":v", v)
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::SRem(key, value) => {
                     let v = AttributeValue::Bs(vec![Blob::new(value.into_vec())]);
@@ -793,16 +787,16 @@ impl super::Backend for Backend {
                                 .set_key(Some(composite_key(&key, NO_SORT_KEY)))
                                 .update_expression("DELETE v :v")
                                 .expression_attribute_values(":v", v)
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::ZAdd(key, value, score) => {
                     let item = TransactWriteItem::builder()
@@ -817,16 +811,16 @@ impl super::Backend for Backend {
                                         ("rk2", attribute_value(&[&float_sort_key(score), value.as_bytes()].concat())),
                                     ],
                                 )))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::ZHAdd(key, field, value, score) => {
                     let item = TransactWriteItem::builder()
@@ -841,16 +835,16 @@ impl super::Backend for Backend {
                                         ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
                                     ],
                                 )))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::ZRem(key, value) => {
                     let item = TransactWriteItem::builder()
@@ -858,16 +852,16 @@ impl super::Backend for Backend {
                             Delete::builder()
                                 .table_name(self.table_name.clone())
                                 .set_key(Some(composite_key(&key, value)))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::ZHRem(key, field) => {
                     let item = TransactWriteItem::builder()
@@ -875,16 +869,16 @@ impl super::Backend for Backend {
                             Delete::builder()
                                 .table_name(self.table_name.clone())
                                 .set_key(Some(composite_key(&key, field)))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::HSet(key, fields) => {
                     let (names, values): (HashMap<_, _>, HashMap<_, _>) = fields
@@ -906,16 +900,16 @@ impl super::Backend for Backend {
                                 ))
                                 .set_expression_attribute_values(Some(values))
                                 .set_expression_attribute_names(Some(names))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::HSetNX(key, field, value, tx) => {
                     let v = AttributeValue::B(Blob::new(value.into_vec()));
@@ -928,16 +922,16 @@ impl super::Backend for Backend {
                                 .update_expression("SET #f = :v")
                                 .expression_attribute_values(":v", v)
                                 .expression_attribute_names("#f", encode_field_name(field.as_bytes()))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: Some(tx),
                         },
-                    )
+                    ))
                 }
                 AtomicWriteSubOperation::HDel(key, fields) => {
                     let names: HashMap<_, _> = fields
@@ -955,19 +949,19 @@ impl super::Backend for Backend {
                                     (0..names.len()).map(|i| format!("#n{}", i)).collect::<Vec<_>>().join(", ")
                                 ))
                                 .set_expression_attribute_names(Some(names))
-                                .build(),
+                                .build()?,
                         )
                         .build();
-                    (
+                    Ok((
                         item,
                         SubOpState {
                             key: key.into_owned(),
                             failure_tx: None,
                         },
-                    )
+                    ))
                 }
             })
-            .unzip();
+            .process_results(|i| i.unzip())?;
         match self
             .client
             .transact_write_items()
@@ -977,12 +971,9 @@ impl super::Backend for Backend {
             .await
             .map_err(|e| e.into_service_error())
         {
-            Err(TransactWriteItemsError {
-                kind: TransactWriteItemsErrorKind::TransactionCanceledException(cancel),
-                ..
-            }) => {
+            Err(TransactWriteItemsError::TransactionCanceledException(cancel)) => {
                 let mut err = None;
-                for (i, reason) in cancel.cancellation_reasons().unwrap_or(&[]).iter().enumerate() {
+                for (i, reason) in cancel.cancellation_reasons().iter().enumerate() {
                     let Some(code) = reason.code.as_deref() else {
                         continue;
                     };
@@ -1017,29 +1008,29 @@ pub async fn create_default_table(client: &Client, table_name: &str) -> Result<(
             AttributeDefinition::builder()
                 .attribute_name("hk")
                 .attribute_type(ScalarAttributeType::B)
-                .build(),
+                .build()?,
             AttributeDefinition::builder()
                 .attribute_name("rk")
                 .attribute_type(ScalarAttributeType::B)
-                .build(),
+                .build()?,
             AttributeDefinition::builder()
                 .attribute_name("rk2")
                 .attribute_type(ScalarAttributeType::B)
-                .build(),
+                .build()?,
         ]))
         .set_key_schema(Some(vec![
-            KeySchemaElement::builder().attribute_name("hk").key_type(KeyType::Hash).build(),
-            KeySchemaElement::builder().attribute_name("rk").key_type(KeyType::Range).build(),
+            KeySchemaElement::builder().attribute_name("hk").key_type(KeyType::Hash).build()?,
+            KeySchemaElement::builder().attribute_name("rk").key_type(KeyType::Range).build()?,
         ]))
         .local_secondary_indexes(
             LocalSecondaryIndex::builder()
                 .index_name("rk2")
                 .set_key_schema(Some(vec![
-                    KeySchemaElement::builder().attribute_name("hk").key_type(KeyType::Hash).build(),
-                    KeySchemaElement::builder().attribute_name("rk2").key_type(KeyType::Range).build(),
+                    KeySchemaElement::builder().attribute_name("hk").key_type(KeyType::Hash).build()?,
+                    KeySchemaElement::builder().attribute_name("rk2").key_type(KeyType::Range).build()?,
                 ]))
                 .projection(Projection::builder().projection_type(ProjectionType::All).build())
-                .build(),
+                .build()?,
         )
         .table_name(table_name)
         .billing_mode(BillingMode::PayPerRequest)
@@ -1053,8 +1044,9 @@ mod test {
     mod backend {
         use crate::{aws_sdk_dynamodbstore, test_backend};
         use aws_sdk_dynamodb::{
-            error::{DescribeTableError, DescribeTableErrorKind},
-            Client, Credentials, Region,
+            config::{Credentials, Region},
+            operation::describe_table::DescribeTableError,
+            Client,
         };
         use tokio::time;
 
@@ -1063,6 +1055,7 @@ mod test {
             let endpoint = std::env::var("DYNAMODB_ENDPOINT").unwrap_or("http://localhost:8000".to_string());
             let creds = Credentials::new("ACCESSKEYID", "SECRET", None, None, "dummy");
             let config = aws_sdk_dynamodb::Config::builder()
+                .behavior_version_latest()
                 .credentials_provider(creds)
                 .endpoint_url(endpoint)
                 .region(Region::from_static("test"))
@@ -1080,10 +1073,7 @@ mod test {
                         .await
                         .map_err(|e| e.into_service_error())
                     {
-                        Err(DescribeTableError {
-                            kind: DescribeTableErrorKind::ResourceNotFoundException(_),
-                            ..
-                        }) => break,
+                        Err(DescribeTableError::ResourceNotFoundException(_)) => break,
                         _ => time::sleep(time::Duration::from_millis(200)).await,
                     }
                 }
