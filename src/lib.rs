@@ -27,6 +27,7 @@ pub use rusoto_core;
 pub use rusoto_credential;
 #[cfg(feature = "rusoto")]
 pub use rusoto_dynamodb;
+use tracing::Span;
 
 #[derive(Debug)]
 pub enum Error {
@@ -475,5 +476,24 @@ impl<'a> AtomicWriteOperation<'a> {
     pub fn h_del<'k: 'a, 'f: 'a, K: Key<'k>, F: Into<Arg<'f>> + Send, I: IntoIterator<Item = F> + Send>(&mut self, key: K, fields: I) {
         self.ops
             .push(AtomicWriteSubOperation::HDel(key.into(), fields.into_iter().map(|k| k.into()).collect()));
+    }
+}
+
+pub(crate) fn add_err_to_span(e: &(dyn std::error::Error + Sync + Send + 'static)) {
+    let span = Span::current();
+    span.record("otel.status_code", "ERROR");
+    span.record("error.msg", e);
+}
+
+pub(crate) trait ResultExt {
+    fn spanify_err(self) -> Self;
+}
+
+impl<T, E: std::error::Error + Sync + Send + 'static> ResultExt for std::result::Result<T, E> {
+    fn spanify_err(self) -> Self {
+        if let Err(ref e) = self {
+            add_err_to_span(e);
+        }
+        self
     }
 }

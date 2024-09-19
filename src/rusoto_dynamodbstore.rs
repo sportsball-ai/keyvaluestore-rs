@@ -1,4 +1,4 @@
-use crate::{ExplicitKey, Key};
+use crate::{ExplicitKey, Key, ResultExt};
 
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Bound, Error, Result, Value};
 use rand::RngCore;
@@ -13,36 +13,6 @@ use std::{
     sync::mpsc::{self, SyncSender},
 };
 use tracing::{field::Empty, info_span, Span};
-
-fn add_err_to_span(e: &(dyn std::error::Error + Sync + Send + 'static)) {
-    let span = Span::current();
-    span.record("otel.status_code", "ERROR");
-    span.record("error.msg", e);
-}
-
-trait ErrExt {
-    fn spanify(self) -> Self;
-}
-
-impl<E: std::error::Error + Sync + Send + 'static> ErrExt for E {
-    fn spanify(self) -> Self {
-        add_err_to_span(&self);
-        self
-    }
-}
-
-trait ResultExt {
-    fn spanify_err(self) -> Self;
-}
-
-impl<T, E: std::error::Error + Sync + Send + 'static> ResultExt for std::result::Result<T, E> {
-    fn spanify_err(self) -> Self {
-        if let Err(ref e) = self {
-            add_err_to_span(e);
-        }
-        self
-    }
-}
 
 #[derive(Clone)]
 pub struct Backend {
@@ -1207,6 +1177,55 @@ impl super::Backend for Backend {
     }
 }
 
+pub async fn create_default_table(client: &DynamoDbClient, table_name: &str) -> Result<()> {
+    let mut create = rusoto_dynamodb::CreateTableInput::default();
+    create.attribute_definitions = vec![
+        AttributeDefinition {
+            attribute_name: "hk".to_string(),
+            attribute_type: "B".to_string(),
+        },
+        AttributeDefinition {
+            attribute_name: "rk".to_string(),
+            attribute_type: "B".to_string(),
+        },
+        AttributeDefinition {
+            attribute_name: "rk2".to_string(),
+            attribute_type: "B".to_string(),
+        },
+    ];
+    create.key_schema = vec![
+        KeySchemaElement {
+            attribute_name: "hk".to_string(),
+            key_type: "HASH".to_string(),
+        },
+        KeySchemaElement {
+            attribute_name: "rk".to_string(),
+            key_type: "RANGE".to_string(),
+        },
+    ];
+    create.local_secondary_indexes = Some(vec![LocalSecondaryIndex {
+        index_name: "rk2".to_string(),
+        key_schema: vec![
+            KeySchemaElement {
+                attribute_name: "hk".to_string(),
+                key_type: "HASH".to_string(),
+            },
+            KeySchemaElement {
+                attribute_name: "rk2".to_string(),
+                key_type: "RANGE".to_string(),
+            },
+        ],
+        projection: Projection {
+            non_key_attributes: None,
+            projection_type: Some("ALL".to_string()),
+        },
+    }]);
+    create.table_name = table_name.to_string();
+    create.billing_mode = Some("PAY_PER_REQUEST".to_string());
+    client.create_table(create).await?;
+    Ok(())
+}
+
 /// Tracks total consumed capacity by repeated/batch operations.
 #[derive(Default)]
 struct TotalConsumedCapacity {
@@ -1259,53 +1278,15 @@ fn record_rcu(capacity: &Option<ConsumedCapacity>, span: &Span) {
     }
 }
 
-pub async fn create_default_table(client: &DynamoDbClient, table_name: &str) -> Result<()> {
-    let mut create = rusoto_dynamodb::CreateTableInput::default();
-    create.attribute_definitions = vec![
-        AttributeDefinition {
-            attribute_name: "hk".to_string(),
-            attribute_type: "B".to_string(),
-        },
-        AttributeDefinition {
-            attribute_name: "rk".to_string(),
-            attribute_type: "B".to_string(),
-        },
-        AttributeDefinition {
-            attribute_name: "rk2".to_string(),
-            attribute_type: "B".to_string(),
-        },
-    ];
-    create.key_schema = vec![
-        KeySchemaElement {
-            attribute_name: "hk".to_string(),
-            key_type: "HASH".to_string(),
-        },
-        KeySchemaElement {
-            attribute_name: "rk".to_string(),
-            key_type: "RANGE".to_string(),
-        },
-    ];
-    create.local_secondary_indexes = Some(vec![LocalSecondaryIndex {
-        index_name: "rk2".to_string(),
-        key_schema: vec![
-            KeySchemaElement {
-                attribute_name: "hk".to_string(),
-                key_type: "HASH".to_string(),
-            },
-            KeySchemaElement {
-                attribute_name: "rk2".to_string(),
-                key_type: "RANGE".to_string(),
-            },
-        ],
-        projection: Projection {
-            non_key_attributes: None,
-            projection_type: Some("ALL".to_string()),
-        },
-    }]);
-    create.table_name = table_name.to_string();
-    create.billing_mode = Some("PAY_PER_REQUEST".to_string());
-    client.create_table(create).await?;
-    Ok(())
+trait ErrExt {
+    fn spanify(self) -> Self;
+}
+
+impl<E: std::error::Error + Sync + Send + 'static> ErrExt for E {
+    fn spanify(self) -> Self {
+        crate::add_err_to_span(&self);
+        self
+    }
 }
 
 #[cfg(test)]
