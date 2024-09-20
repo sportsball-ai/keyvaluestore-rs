@@ -7,7 +7,7 @@ use aws_sdk_dynamodb::{
     primitives::Blob,
     types::{
         AttributeDefinition, AttributeValue, BillingMode, ConsumedCapacity, Delete, KeySchemaElement, KeyType, KeysAndAttributes, LocalSecondaryIndex,
-        Projection, ProjectionType, Put, ReturnValue, ScalarAttributeType, Select, TransactWriteItem, Update,
+        Projection, ProjectionType, Put, ReturnConsumedCapacity, ReturnValue, ScalarAttributeType, Select, TransactWriteItem, Update,
     },
 };
 use itertools::Itertools as _;
@@ -196,6 +196,7 @@ impl Backend {
         let mut query = self
             .client
             .query()
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .table_name(self.table_name.clone())
             .consistent_read(!self.allow_eventually_consistent_reads)
             .key_condition_expression(condition.clone())
@@ -285,6 +286,7 @@ impl Backend {
                     ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
                 ],
             )))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -304,6 +306,7 @@ impl Backend {
             .delete_item()
             .table_name(self.table_name.clone())
             .set_key(Some(composite_key(&key, field)))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -329,7 +332,8 @@ impl Backend {
             .key_condition_expression(condition.clone())
             .set_expression_attribute_values(Some(attribute_values.clone()))
             .index_name("rk2")
-            .select(Select::Count);
+            .select(Select::Count)
+            .return_consumed_capacity(ReturnConsumedCapacity::Total);
 
         let mut count = 0;
 
@@ -360,6 +364,7 @@ impl super::Backend for Backend {
             .consistent_read(!self.allow_eventually_consistent_reads)
             .set_key(Some(composite_key(&key, NO_SORT_KEY)))
             .table_name(self.table_name.clone())
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -383,6 +388,7 @@ impl super::Backend for Backend {
             .put_item()
             .table_name(self.table_name.clone())
             .set_item(Some(new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -405,6 +411,7 @@ impl super::Backend for Backend {
             .set_item(Some(new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
             .condition_expression("v = :v")
             .expression_attribute_values(":v", attribute_value(old_value))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .map_err(|e| e.into_service_error())
@@ -431,6 +438,7 @@ impl super::Backend for Backend {
             .table_name(self.table_name.clone())
             .set_item(Some(new_item(&key, NO_SORT_KEY, vec![("v", attribute_value(value))])))
             .condition_expression("attribute_not_exists(v)")
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .map_err(|e| e.into_service_error())
@@ -457,6 +465,7 @@ impl super::Backend for Backend {
             .table_name(self.table_name.clone())
             .set_key(Some(composite_key(&key, NO_SORT_KEY)))
             .return_values(ReturnValue::AllOld)
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -482,6 +491,7 @@ impl super::Backend for Backend {
             .table_name(self.table_name.clone())
             .update_expression("ADD v :v")
             .expression_attribute_values(":v", v)
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -503,6 +513,7 @@ impl super::Backend for Backend {
             .consistent_read(!self.allow_eventually_consistent_reads)
             .set_key(Some(composite_key(&key, NO_SORT_KEY)))
             .table_name(self.table_name.clone())
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -533,6 +544,7 @@ impl super::Backend for Backend {
             .update_expression("ADD v :n")
             .expression_attribute_values(":n", AttributeValue::N(n.to_string()))
             .return_values(ReturnValue::AllNew)
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -578,6 +590,7 @@ impl super::Backend for Backend {
             ))
             .set_expression_attribute_values(Some(values))
             .set_expression_attribute_names(Some(names))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -608,6 +621,7 @@ impl super::Backend for Backend {
                 (0..names.len()).map(|i| format!("#n{}", i)).collect::<Vec<_>>().join(", ")
             ))
             .set_expression_attribute_names(Some(names))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -629,6 +643,7 @@ impl super::Backend for Backend {
             .consistent_read(!self.allow_eventually_consistent_reads)
             .set_key(Some(composite_key(&key, NO_SORT_KEY)))
             .table_name(self.table_name.clone())
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -656,6 +671,7 @@ impl super::Backend for Backend {
             .consistent_read(!self.allow_eventually_consistent_reads)
             .set_key(Some(composite_key(&key, NO_SORT_KEY)))
             .table_name(self.table_name.clone())
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .spanify_err()?;
@@ -797,6 +813,7 @@ impl super::Backend for Backend {
                 .client
                 .batch_get_item()
                 .request_items(self.table_name.clone(), keys_and_attributes)
+                .return_consumed_capacity(ReturnConsumedCapacity::Total)
                 .send()
                 .await
                 .spanify_err()?;
@@ -1291,6 +1308,7 @@ impl super::Backend for Backend {
             .transact_write_items()
             .client_request_token(token)
             .set_transact_items(Some(transact_items))
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
             .send()
             .await
             .map_err(|e| e.into_service_error())
