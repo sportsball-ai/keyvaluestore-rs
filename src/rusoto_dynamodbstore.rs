@@ -1188,55 +1188,6 @@ impl super::Backend for Backend {
     }
 }
 
-pub async fn create_default_table(client: &DynamoDbClient, table_name: &str) -> Result<()> {
-    let mut create = rusoto_dynamodb::CreateTableInput::default();
-    create.attribute_definitions = vec![
-        AttributeDefinition {
-            attribute_name: "hk".to_string(),
-            attribute_type: "B".to_string(),
-        },
-        AttributeDefinition {
-            attribute_name: "rk".to_string(),
-            attribute_type: "B".to_string(),
-        },
-        AttributeDefinition {
-            attribute_name: "rk2".to_string(),
-            attribute_type: "B".to_string(),
-        },
-    ];
-    create.key_schema = vec![
-        KeySchemaElement {
-            attribute_name: "hk".to_string(),
-            key_type: "HASH".to_string(),
-        },
-        KeySchemaElement {
-            attribute_name: "rk".to_string(),
-            key_type: "RANGE".to_string(),
-        },
-    ];
-    create.local_secondary_indexes = Some(vec![LocalSecondaryIndex {
-        index_name: "rk2".to_string(),
-        key_schema: vec![
-            KeySchemaElement {
-                attribute_name: "hk".to_string(),
-                key_type: "HASH".to_string(),
-            },
-            KeySchemaElement {
-                attribute_name: "rk2".to_string(),
-                key_type: "RANGE".to_string(),
-            },
-        ],
-        projection: Projection {
-            non_key_attributes: None,
-            projection_type: Some("ALL".to_string()),
-        },
-    }]);
-    create.table_name = table_name.to_string();
-    create.billing_mode = Some("PAY_PER_REQUEST".to_string());
-    client.create_table(create).await?;
-    Ok(())
-}
-
 /// Tracks total consumed capacity by repeated/batch operations.
 #[derive(Default)]
 struct TotalConsumedCapacity {
@@ -1287,6 +1238,55 @@ fn record_rcu(capacity: &Option<ConsumedCapacity>, span: &Span) {
     if let Some(rcu) = capacity.as_ref().and_then(|c| c.capacity_units) {
         span.record("consumed_rcu", rcu);
     }
+}
+
+pub async fn create_default_table(client: &DynamoDbClient, table_name: &str) -> Result<()> {
+    let mut create = rusoto_dynamodb::CreateTableInput::default();
+    create.attribute_definitions = vec![
+        AttributeDefinition {
+            attribute_name: "hk".to_string(),
+            attribute_type: "B".to_string(),
+        },
+        AttributeDefinition {
+            attribute_name: "rk".to_string(),
+            attribute_type: "B".to_string(),
+        },
+        AttributeDefinition {
+            attribute_name: "rk2".to_string(),
+            attribute_type: "B".to_string(),
+        },
+    ];
+    create.key_schema = vec![
+        KeySchemaElement {
+            attribute_name: "hk".to_string(),
+            key_type: "HASH".to_string(),
+        },
+        KeySchemaElement {
+            attribute_name: "rk".to_string(),
+            key_type: "RANGE".to_string(),
+        },
+    ];
+    create.local_secondary_indexes = Some(vec![LocalSecondaryIndex {
+        index_name: "rk2".to_string(),
+        key_schema: vec![
+            KeySchemaElement {
+                attribute_name: "hk".to_string(),
+                key_type: "HASH".to_string(),
+            },
+            KeySchemaElement {
+                attribute_name: "rk2".to_string(),
+                key_type: "RANGE".to_string(),
+            },
+        ],
+        projection: Projection {
+            non_key_attributes: None,
+            projection_type: Some("ALL".to_string()),
+        },
+    }]);
+    create.table_name = table_name.to_string();
+    create.billing_mode = Some("PAY_PER_REQUEST".to_string());
+    client.create_table(create).await?;
+    Ok(())
 }
 
 #[cfg(test)]
