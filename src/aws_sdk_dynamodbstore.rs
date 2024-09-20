@@ -259,6 +259,91 @@ impl Backend {
         }
         Ok(members)
     }
+
+    async fn zh_add_impl<'a, 'b, 'c, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(
+        &self,
+        key: ExplicitKey<'a>,
+        field: F,
+        value: V,
+        score: f64,
+    ) -> Result<()> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+
+        let field = field.into();
+        let value = value.into();
+        let result = self
+            .client
+            .put_item()
+            .table_name(self.table_name.clone())
+            .set_item(Some(new_item(
+                &key,
+                &field,
+                vec![
+                    ("v", attribute_value(&value)),
+                    ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
+                ],
+            )))
+            .send()
+            .await
+            .spanify_err()?;
+
+        record_wcu(&result.consumed_capacity, &span);
+
+        Ok(())
+    }
+
+    async fn zh_rem_impl<'a, 'b, F: Into<Arg<'b>> + Send>(&self, key: ExplicitKey<'a>, field: F) -> Result<()> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+
+        let result = self
+            .client
+            .delete_item()
+            .table_name(self.table_name.clone())
+            .set_key(Some(composite_key(&key, field)))
+            .send()
+            .await
+            .spanify_err()?;
+
+        record_wcu(&result.consumed_capacity, &span);
+
+        Ok(())
+    }
+
+    async fn zh_count_impl<'a>(&self, key: ExplicitKey<'a>, min: f64, max: f64) -> Result<usize> {
+        if min > max {
+            return Ok(0);
+        }
+
+        let (min, max) = score_bounds(min, max);
+        let (condition, attribute_values) = query_condition(key.into(), min, max, true);
+
+        let mut query = self
+            .client
+            .query()
+            .table_name(self.table_name.clone())
+            .consistent_read(!self.allow_eventually_consistent_reads)
+            .key_condition_expression(condition.clone())
+            .set_expression_attribute_values(Some(attribute_values.clone()))
+            .index_name("rk2")
+            .select(Select::Count);
+
+        let mut count = 0;
+
+        loop {
+            let result = query.clone().send().await.spanify_err()?;
+            count += result.count as usize;
+            match result.last_evaluated_key {
+                Some(key) => query = query.set_exclusive_start_key(Some(key)),
+                None => break,
+            }
+        }
+
+        Ok(count)
+    }
 }
 
 #[async_trait]
@@ -596,104 +681,37 @@ impl super::Backend for Backend {
 
     async fn z_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V, score: f64) -> Result<()> {
         let v = value.into();
-        self.zh_add(key, &v, &v, score).await
+        self.zh_add_impl(key.into(), &v, &v, score).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
 
     async fn zh_add<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(&self, key: K, field: F, value: V, score: f64) -> Result<()> {
-        let key = key.into();
-        let span = tracing::Span::current();
-        span.record("key", tracing::field::debug(&key));
-
-        let field = field.into();
-        let value = value.into();
-        let result = self
-            .client
-            .put_item()
-            .table_name(self.table_name.clone())
-            .set_item(Some(new_item(
-                &key,
-                &field,
-                vec![
-                    ("v", attribute_value(&value)),
-                    ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
-                ],
-            )))
-            .send()
-            .await
-            .spanify_err()?;
-
-        record_wcu(&result.consumed_capacity, &span);
-
-        Ok(())
+        self.zh_add_impl(key.into(), field, value, score).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
 
     async fn zh_rem<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
-        let key = key.into();
-        let span = tracing::Span::current();
-        span.record("key", tracing::field::debug(&key));
-
-        let result = self
-            .client
-            .delete_item()
-            .table_name(self.table_name.clone())
-            .set_key(Some(composite_key(&key, field)))
-            .send()
-            .await
-            .spanify_err()?;
-
-        record_wcu(&result.consumed_capacity, &span);
-
-        Ok(())
+        self.zh_rem_impl(key.into(), field).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
 
     async fn z_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
-        self.zh_rem(key, value).await
+        self.zh_rem_impl(key.into(), value).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
 
     async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
-        if min > max {
-            return Ok(0);
-        }
-
-        let (min, max) = score_bounds(min, max);
-        let (condition, attribute_values) = query_condition(key.into(), min, max, true);
-
-        let mut query = self
-            .client
-            .query()
-            .table_name(self.table_name.clone())
-            .consistent_read(!self.allow_eventually_consistent_reads)
-            .key_condition_expression(condition.clone())
-            .set_expression_attribute_values(Some(attribute_values.clone()))
-            .index_name("rk2")
-            .select(Select::Count);
-
-        let mut count = 0;
-
-        loop {
-            let result = query.clone().send().await.spanify_err()?;
-            count += result.count as usize;
-            match result.last_evaluated_key {
-                Some(key) => query = query.set_exclusive_start_key(Some(key)),
-                None => break,
-            }
-        }
-
-        Ok(count)
+        self.zh_count_impl(key.into(), min, max).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
 
     async fn zh_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
-        self.z_count(key, min, max).await
+        self.zh_count_impl(key.into(), min, max).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
