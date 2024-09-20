@@ -14,6 +14,17 @@ use std::{
 };
 use tracing::{field::Empty, info_span, Span};
 
+trait ErrExt {
+    fn spanify(self) -> Self;
+}
+
+impl<E: std::error::Error + Sync + Send + 'static> ErrExt for E {
+    fn spanify(self) -> Self {
+        crate::add_err_to_span(&self);
+        self
+    }
+}
+
 #[derive(Clone)]
 pub struct Backend {
     pub allow_eventually_consistent_reads: bool,
@@ -1275,17 +1286,6 @@ fn record_wcu(capacity: &Option<ConsumedCapacity>, span: &Span) {
 fn record_rcu(capacity: &Option<ConsumedCapacity>, span: &Span) {
     if let Some(rcu) = capacity.as_ref().and_then(|c| c.capacity_units) {
         span.record("consumed_rcu", rcu);
-    }
-}
-
-trait ErrExt {
-    fn spanify(self) -> Self;
-}
-
-impl<E: std::error::Error + Sync + Send + 'static> ErrExt for E {
-    fn spanify(self) -> Self {
-        crate::add_err_to_span(&self);
-        self
     }
 }
 
