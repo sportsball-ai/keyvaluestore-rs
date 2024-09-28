@@ -5,7 +5,13 @@ extern crate async_trait;
 extern crate serial_test;
 extern crate simple_error;
 
-use std::{collections::HashMap, convert::From, fmt, ops::Bound, sync::mpsc};
+use std::{
+    collections::HashMap,
+    convert::From,
+    fmt,
+    ops::Bound,
+    sync::{mpsc, Arc},
+};
 
 pub mod backendtest;
 
@@ -47,22 +53,40 @@ type Result<T> = std::result::Result<T, Error>;
 
 pub trait Key<'a>: Into<ExplicitKey<'a>> + Send + Sync {}
 
-struct UnredactedKey<'a>(Arg<'a>);
+impl<'a> Key<'a> for ExplicitKey<'a> {}
 
-impl<'a> Key<'a> for UnredactedKey<'a> {}
+impl<'a> Key<'a> for &'a ExplicitKey<'a> {}
 
-impl<'a> From<UnredactedKey<'a>> for ExplicitKey<'a> {
-    fn from(val: UnredactedKey<'a>) -> Self {
-        Self {
-            redacted: val.0.clone(),
-            unredacted: val.0,
+impl<'a> From<&'a ExplicitKey<'a>> for ExplicitKey<'a> {
+    fn from(val: &'a ExplicitKey<'a>) -> Self {
+        ExplicitKey {
+            unredacted: Arg::Borrowed(val.unredacted.as_bytes()),
+            redacted: val.redacted.as_ref().map(|a| Arg::Borrowed(a.as_bytes())),
         }
     }
 }
 
+#[derive(Clone)]
+pub struct ExplicitKey<'a> {
+    unredacted: Arg<'a>,
+
+    /// Present iff different.
+    redacted: Option<Arg<'a>>,
+}
+
 /// Returns a key which will not be redacted in trace/log output.
-pub fn unredacted<'a, A: Into<Arg<'a>>>(a: A) -> impl Key<'a> {
-    UnredactedKey(a.into())
+pub fn unredacted<'a, A: Into<Arg<'a>>>(a: A) -> ExplicitKey<'a> {
+    ExplicitKey {
+        unredacted: a.into(),
+        redacted: None,
+    }
+}
+
+pub fn redacted<'a, A1: Into<Arg<'a>>, A2: Into<Arg<'a>>>(unredacted: A1, redacted: A2) -> ExplicitKey<'a> {
+    ExplicitKey {
+        unredacted: unredacted.into(),
+        redacted: Some(redacted.into()),
+    }
 }
 
 /// Static strings (typically literals) are assumed to be non-sensitive.
@@ -71,49 +95,45 @@ impl Key<'static> for &'static str {}
 impl From<&'static str> for ExplicitKey<'static> {
     fn from(val: &'static str) -> Self {
         ExplicitKey {
-            redacted: val.into(),
-            unredacted: val.into(),
+            unredacted: Arg::Borrowed(val.as_bytes()),
+            redacted: None,
         }
     }
-}
-
-#[derive(Clone)]
-pub struct ExplicitKey<'a> {
-    pub redacted: Arg<'a>,
-    pub unredacted: Arg<'a>,
 }
 
 impl ExplicitKey<'_> {
+    pub fn borrow(&self) -> ExplicitKey<'_> {
+        ExplicitKey {
+            unredacted: Arg::Borrowed(self.unredacted.as_bytes()),
+            redacted: self.redacted.as_ref().map(|r| Arg::Borrowed(r.as_bytes())),
+        }
+    }
+
     pub fn into_owned(self) -> ExplicitKey<'static> {
         ExplicitKey {
-            redacted: Arg::Owned(self.redacted.into_vec()),
-            unredacted: Arg::Owned(self.unredacted.into_vec()),
+            unredacted: self.unredacted.into_owned(),
+            redacted: self.redacted.map(Arg::into_owned),
         }
+    }
+
+    pub fn unredacted(&self) -> &[u8] {
+        self.unredacted.as_bytes()
+    }
+
+    pub fn redacted(&self) -> &[u8] {
+        self.redacted.as_ref().map(Arg::as_bytes).unwrap_or_else(|| self.unredacted.as_bytes())
     }
 }
 
-impl<'a> PartialEq for ExplicitKey<'a> {
+impl PartialEq for ExplicitKey<'_> {
     fn eq(&self, other: &Self) -> bool {
-        self.unredacted == other.unredacted
+        self.unredacted() == other.unredacted()
     }
 }
-
-impl<'a> Key<'a> for &'a ExplicitKey<'a> {}
-
-impl<'a> From<&'a ExplicitKey<'a>> for ExplicitKey<'a> {
-    fn from(val: &'a ExplicitKey<'a>) -> Self {
-        Self {
-            redacted: Arg::Borrowed(val.redacted.as_bytes()),
-            unredacted: Arg::Borrowed(val.unredacted.as_bytes()),
-        }
-    }
-}
-
-impl<'a> Key<'a> for ExplicitKey<'a> {}
 
 impl std::fmt::Debug for ExplicitKey<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        std::fmt::Display::fmt(&self.redacted.as_bytes().escape_ascii(), f)
+        std::fmt::Display::fmt(&self.redacted().escape_ascii(), f)
     }
 }
 
@@ -142,6 +162,13 @@ impl<'a> Arg<'a> {
         match self {
             Self::Owned(v) => v,
             Self::Borrowed(v) => v.to_vec(),
+        }
+    }
+
+    pub fn into_owned(self) -> Arg<'static> {
+        match self {
+            Self::Owned(v) => Arg::Owned(v),
+            Self::Borrowed(v) => Arg::Owned(v.to_vec()),
         }
     }
 }
@@ -286,16 +313,12 @@ pub trait Backend {
     async fn zh_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
     async fn zh_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>>;
 
-    async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
+    async fn exec_batch(&self, op: BatchOperation) -> Result<()> {
         for op in op.ops {
             match op {
-                BatchSubOperation::Get(key, tx) => {
-                    if let Some(v) = self.get(&key).await? {
-                        match tx.try_send(v) {
-                            Ok(_) => {}
-                            Err(mpsc::TrySendError::Disconnected(_)) => {}
-                            Err(e) => return Err(e.into()),
-                        }
+                BatchSubOperation::Get(get) => {
+                    if let Some(v) = self.get(get.0.key.clone()).await? {
+                        get.0.put(v);
                     }
                 }
             }
@@ -306,37 +329,57 @@ pub trait Backend {
     async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool>;
 }
 
-pub struct GetResult {
-    rx: mpsc::Receiver<Value>,
+pub struct GetResult(Arc<GetInner>);
+
+struct GetInner {
+    key: ExplicitKey<'static>,
+    value: std::sync::Mutex<Option<Value>>,
+}
+
+impl GetInner {
+    fn put(&self, value: Value) {
+        let mut l = self.value.lock().expect("GetInner should not be poisoned");
+        assert!(l.is_none(), "GetInner should not be double-put");
+        *l = Some(value);
+    }
 }
 
 impl GetResult {
-    pub fn new() -> (Self, mpsc::SyncSender<Value>) {
-        let (tx, rx) = mpsc::sync_channel(1);
-        (Self { rx }, tx)
+    fn new(key: ExplicitKey<'static>) -> (Self, Arc<GetInner>) {
+        let inner = Arc::new(GetInner {
+            key,
+            value: std::sync::Mutex::new(None),
+        });
+        (Self(inner.clone()), inner.clone())
     }
 
-    pub fn value(self) -> Option<Value> {
-        self.rx.try_recv().ok()
+    /// Returns the key and value, consuming the GetResult.
+    ///
+    /// Panics if the corresponding `exec_batch` operation has not been completed.
+    pub fn into_parts(self) -> (ExplicitKey<'static>, Option<Value>) {
+        let inner = Arc::into_inner(self.0).expect("exec_batch should be completed first");
+        (inner.key, inner.value.into_inner().expect("GetResult should not be poisoned"))
     }
 }
 
-pub enum BatchSubOperation<'a> {
-    Get(ExplicitKey<'a>, mpsc::SyncSender<Value>),
+pub enum BatchSubOperation {
+    Get(BatchGet),
 }
 
-pub struct BatchOperation<'a> {
-    pub ops: Vec<BatchSubOperation<'a>>,
+pub struct BatchGet(Arc<GetInner>);
+
+pub struct BatchOperation {
+    pub ops: Vec<BatchSubOperation>,
 }
 
-impl<'a> BatchOperation<'a> {
+impl BatchOperation {
     pub fn new() -> Self {
         Self { ops: vec![] }
     }
 
-    pub fn get<K: Key<'a>>(&mut self, key: K) -> GetResult {
-        let (ret, value_tx) = GetResult::new();
-        self.ops.push(BatchSubOperation::Get(key.into(), value_tx));
+    pub fn get<K: Key<'static>>(&mut self, key: K) -> GetResult {
+        let (ret, inner) = GetResult::new(key.into());
+        self.ops.push(BatchSubOperation::Get(BatchGet(inner)));
         ret
     }
 }

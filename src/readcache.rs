@@ -1,10 +1,8 @@
-use crate::GetResult;
-
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Key, Result, Value};
 use std::{
     collections::HashMap,
     ops::Bound,
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex},
 };
 
 #[derive(Clone)]
@@ -268,48 +266,39 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         self.inner.z_rev_range_by_lex(key, min, max, limit).await
     }
 
-    async fn exec_batch(&self, mut op: BatchOperation<'_>) -> Result<()> {
-        let mut gets = HashMap::new();
-
+    async fn exec_batch(&self, mut op: BatchOperation) -> Result<()> {
         // Filter ops down to misses.
         {
             let cache = self.cache.lock().unwrap();
             op.ops.retain_mut(|op| match op {
-                BatchSubOperation::Get(key, tx) => match cache.get(key.unredacted.as_bytes()).cloned() {
+                BatchSubOperation::Get(get) => match cache.get(get.0.key.unredacted.as_bytes()).cloned() {
                     Some(Entry::Get(v)) => {
                         if let Some(v) = v {
-                            match tx.try_send(v) {
-                                Ok(_) => {}
-                                Err(mpsc::TrySendError::Disconnected(_)) => {}
-                                Err(mpsc::TrySendError::Full(_)) => panic!("tx should not be full"),
-                            }
+                            get.0.put(v);
                         }
                         false
                     }
-                    _ => {
-                        let (inner, inner_tx) = GetResult::new();
-                        gets.insert(key.unredacted.to_vec(), (inner, std::mem::replace(tx, inner_tx)));
-                        true
-                    }
+                    _ => true,
                 },
             });
         }
+
+        let gets = op
+            .ops
+            .iter()
+            .map(|op| match op {
+                BatchSubOperation::Get(get) => Arc::clone(&get.0),
+            })
+            .collect::<Vec<_>>();
 
         if op.ops.is_empty() {
             Ok(())
         } else {
             match self.inner.exec_batch(op).await {
                 Ok(_) => {
-                    for (key, (result, tx)) in gets {
-                        let v = result.value();
-                        self.store(key.into(), Entry::Get(v.clone()));
-                        if let Some(v) = v {
-                            match tx.try_send(v) {
-                                Ok(_) => {}
-                                Err(mpsc::TrySendError::Disconnected(_)) => {}
-                                Err(e) => return Err(e.into()),
-                            }
-                        }
+                    for get in gets {
+                        let l = get.value.lock().expect("GetInner should not be poisoned");
+                        self.store(get.key.unredacted.as_bytes().into(), Entry::Get(l.clone()));
                     }
                     Ok(())
                 }
