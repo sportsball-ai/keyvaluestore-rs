@@ -8,10 +8,7 @@ use rusoto_dynamodb::{
     TransactWriteItem, Update,
 };
 use simple_error::SimpleError;
-use std::{
-    collections::HashMap,
-    sync::mpsc::{self, SyncSender},
-};
+use std::{collections::HashMap, sync::mpsc::SyncSender};
 use tracing::{field::Empty, info_span, Span};
 
 trait ErrExt {
@@ -681,7 +678,7 @@ impl super::Backend for Backend {
     }
 
     #[tracing::instrument(skip_all, fields(consumed_rcu, consistent = !self.allow_eventually_consistent_reads, error.msg, otel.status_code, otel.span_kind = "client"))]
-    async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
+    async fn exec_batch(&self, op: BatchOperation) -> Result<()> {
         if op.ops.is_empty() {
             return Ok(());
         }
@@ -690,12 +687,12 @@ impl super::Backend for Backend {
             .ops
             .iter()
             .map(|op| match op {
-                BatchSubOperation::Get(key, _) => composite_key(&key, NO_SORT_KEY),
+                BatchSubOperation::Get(get) => composite_key(&get.0.key, NO_SORT_KEY),
             })
             .collect();
 
         struct Op<'a> {
-            tx: &'a mpsc::SyncSender<Value>,
+            get: &'a crate::BatchGet,
             _span: Span,
         }
 
@@ -703,9 +700,9 @@ impl super::Backend for Backend {
             .ops
             .iter()
             .map(|op| match op {
-                BatchSubOperation::Get(key, tx) => {
-                    let span = info_span!("get", ?key);
-                    (key.unredacted.as_bytes(), Op { tx, _span: span })
+                BatchSubOperation::Get(get) => {
+                    let span = info_span!("get", key = ?get.0.key);
+                    (get.0.key.unredacted.as_bytes(), Op { get, _span: span })
                 }
             })
             .collect();
@@ -730,7 +727,7 @@ impl super::Backend for Backend {
                 for mut item in items {
                     if let Some(v) = item.remove("v").and_then(|v| v.b).map(|b| b.to_vec().into()) {
                         if let Some(op) = item.remove("hk").and_then(|hk| hk.b).and_then(|b| ops.remove(&b as &[u8])) {
-                            let _ = op.tx.try_send(v);
+                            let _ = op.get.0.put(v);
                         }
                     }
                 }
