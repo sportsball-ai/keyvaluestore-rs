@@ -205,6 +205,7 @@ impl Backend {
             .set_index_name(if secondary_index { Some("rk2".to_string()) } else { None });
 
         let mut members = vec![];
+        let mut cap = TotalConsumedCapacity::default();
 
         while limit == 0 || members.len() < limit {
             let mut q = query.clone();
@@ -212,6 +213,11 @@ impl Backend {
                 q = q.limit((limit - members.len() + 1) as _);
             }
             let result = q.send().await.spanify_err()?;
+
+            if let Some(c) = result.consumed_capacity {
+                cap.add_as_rcu(&c);
+            }
+
             if let Some(mut items) = result.items {
                 let mut skip = 0;
 
@@ -258,6 +264,8 @@ impl Backend {
         while limit > 0 && members.len() > limit {
             members.pop();
         }
+
+        cap.record_to(&span);
         Ok(members)
     }
 
@@ -321,6 +329,9 @@ impl Backend {
             return Ok(0);
         }
 
+        let span = tracing::Span::current();
+        span.record("key", tracing::field::debug(&key));
+
         let (min, max) = score_bounds(min, max);
         let (condition, attribute_values) = query_condition(key.into(), min, max, true);
 
@@ -336,16 +347,23 @@ impl Backend {
             .return_consumed_capacity(ReturnConsumedCapacity::Total);
 
         let mut count = 0;
+        let mut cap = TotalConsumedCapacity::default();
 
         loop {
             let result = query.clone().send().await.spanify_err()?;
             count += result.count as usize;
+
+            if let Some(c) = result.consumed_capacity {
+                cap.add_as_rcu(&c);
+            }
+
             match result.last_evaluated_key {
                 Some(key) => query = query.set_exclusive_start_key(Some(key)),
                 None => break,
             }
         }
 
+        cap.record_to(&span);
         Ok(count)
     }
 }
@@ -701,44 +719,37 @@ impl super::Backend for Backend {
     }
 
     #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
-
     async fn zh_add<'a, 'b, 'c, K: Key<'a>, F: Into<Arg<'b>> + Send, V: Into<Arg<'c>> + Send>(&self, key: K, field: F, value: V, score: f64) -> Result<()> {
         self.zh_add_impl(key.into(), field, value, score).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
-
     async fn zh_rem<'a, 'b, K: Key<'a>, F: Into<Arg<'b>> + Send>(&self, key: K, field: F) -> Result<()> {
         self.zh_rem_impl(key.into(), field).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
-
     async fn z_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         self.zh_rem_impl(key.into(), value).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
-
     async fn z_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         self.zh_count_impl(key.into(), min, max).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
-
     async fn zh_count<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64) -> Result<usize> {
         self.zh_count_impl(key.into(), min, max).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
-
     async fn z_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
         self.z_range_impl(key, min.into(), max.into(), limit, false, true).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
-
     async fn zh_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         self.z_range_by_score(key, min, max, limit).await
     }
