@@ -1,4 +1,4 @@
-use crate::{ExplicitKey, Key};
+use crate::{ExplicitKey, Key, ResultExt};
 
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Bound, Error, Result, Value};
 use rand::RngCore;
@@ -14,32 +14,13 @@ use std::{
 };
 use tracing::{field::Empty, info_span, Span};
 
-fn add_err_to_span(e: &(dyn std::error::Error + Sync + Send + 'static)) {
-    let span = Span::current();
-    span.record("otel.status_code", "ERROR");
-    span.record("error.msg", e);
-}
-
 trait ErrExt {
     fn spanify(self) -> Self;
 }
 
 impl<E: std::error::Error + Sync + Send + 'static> ErrExt for E {
     fn spanify(self) -> Self {
-        add_err_to_span(&self);
-        self
-    }
-}
-
-trait ResultExt {
-    fn spanify_err(self) -> Self;
-}
-
-impl<T, E: std::error::Error + Sync + Send + 'static> ResultExt for std::result::Result<T, E> {
-    fn spanify_err(self) -> Self {
-        if let Err(ref e) = self {
-            add_err_to_span(e);
-        }
+        crate::add_err_to_span(&self);
         self
     }
 }
