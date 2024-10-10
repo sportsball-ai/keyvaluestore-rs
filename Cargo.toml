@@ -1,6 +1,6 @@
 [package]
 name = "keyvaluestore"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["Christopher Brown <ccbrown112@gmail.com>"]
 edition = "2021"
 rust-version = "1.70"
@@ -9,10 +9,6 @@ rust-version = "1.70"
 async-trait = "0.1.32"
 simple-error = "0.2.1"
 redis = { version = "0.21.0", features = ["tokio-comp"], optional = true }
-# we use a fork to work around https://github.com/rusoto/rusoto/issues/1774
-rusoto_core = { git = "https://github.com/sportsball-ai/rusoto", rev = "1a6a02519ff0348f0b9a4567a49e0faf891ce3a0", optional = true }
-rusoto_credential = { git = "https://github.com/sportsball-ai/rusoto", rev = "1a6a02519ff0348f0b9a4567a49e0faf891ce3a0", optional = true }
-rusoto_dynamodb = { git = "https://github.com/sportsball-ai/rusoto", rev = "1a6a02519ff0348f0b9a4567a49e0faf891ce3a0", optional = true }
 bytes = "1.0"
 rand = "0.7.3"
 base64 = "0.12.2"
@@ -24,7 +20,6 @@ itertools = "0.12.0"
 default = ["aws-sdk"]
 aws-sdk = ["dep:aws-sdk-dynamodb"]
 redis = ["dep:redis"]
-rusoto = ["dep:rusoto_core", "dep:rusoto_credential", "dep:rusoto_dynamodb"]
 
 [dev-dependencies]
 serial_test = "0.4.0"
