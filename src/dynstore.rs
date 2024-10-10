@@ -9,8 +9,6 @@ pub enum Backend {
     Memory(memorystore::Backend),
     #[cfg(feature = "redis")]
     Redis(crate::redisstore::Backend),
-    #[cfg(feature = "rusoto")]
-    RusotoDynamoDB(crate::rusoto_dynamodbstore::Backend),
     ReadCache(Box<readcache::Backend<Backend>>),
 }
 
@@ -27,8 +25,6 @@ macro_rules! dispatch {
             Self::Memory($backend) => $expansion,
             #[cfg(feature = "redis")]
             Self::Redis($backend) => $expansion,
-            #[cfg(feature = "rusoto")]
-            Self::RusotoDynamoDB($backend) => $expansion,
             Self::ReadCache($backend) => $expansion,
         }
         .await
