@@ -444,7 +444,7 @@ macro_rules! test_backend {
             let get = batch.get("foo");
             b.exec_batch(batch).await.unwrap();
 
-            assert_eq!(get.value(), Some("bar".into()));
+            assert_eq!(get.into_parts().1, Some("bar".into()));
 
             let mut batch = BatchOperation::new();
             let get = batch.get("foo");
@@ -452,9 +452,9 @@ macro_rules! test_backend {
             let get3 = batch.get("foo3");
             b.exec_batch(batch).await.unwrap();
 
-            assert_eq!(get.value(), Some("bar".into()));
-            assert_eq!(get2.value(), Some("bar2".into()));
-            assert_eq!(get3.value(), None);
+            assert_eq!(get.into_parts().1, Some("bar".into()));
+            assert_eq!(get2.into_parts().1, Some("bar2".into()));
+            assert_eq!(get3.into_parts().1, None);
         }
 
         #[tokio::test]
