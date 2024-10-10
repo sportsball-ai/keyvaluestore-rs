@@ -165,7 +165,7 @@ fn decode_field_name(name: &String) -> Option<Vec<u8>> {
 }
 
 impl Backend {
-    async fn z_range_impl<'k, 'm, 'n, K: Key<'k>, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(
+    async fn zh_range_impl<'k, 'm, 'n, K: Key<'k>, M: Into<Arg<'m>>, N: Into<Arg<'n>>>(
         &self,
         key: K,
         min: Bound<M>,
@@ -746,23 +746,25 @@ impl super::Backend for Backend {
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
-        self.z_range_impl(key, min.into(), max.into(), limit, false, true).await
+        self.zh_range_impl(key, min.into(), max.into(), limit, false, true).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
-        self.z_range_by_score(key, min, max, limit).await
+        let (min, max) = score_bounds(min, max);
+        self.zh_range_impl(key, min.into(), max.into(), limit, false, true).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn z_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
         let (min, max) = score_bounds(min, max);
-        self.z_range_impl(key, min.into(), max.into(), limit, true, true).await
+        self.zh_range_impl(key, min.into(), max.into(), limit, true, true).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn zh_rev_range_by_score<'a, K: Key<'a>>(&self, key: K, min: f64, max: f64, limit: usize) -> Result<Vec<Value>> {
-        self.z_rev_range_by_score(key, min, max, limit).await
+        let (min, max) = score_bounds(min, max);
+        self.zh_range_impl(key.into(), min.into(), max.into(), limit, true, true).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
@@ -774,7 +776,7 @@ impl super::Backend for Backend {
         limit: usize,
     ) -> Result<Vec<Value>> {
         let (min, max) = lex_bounds(0.0, min, max);
-        self.z_range_impl(key, min, max, limit, false, true).await
+        self.zh_range_impl(key, min, max, limit, false, true).await
     }
 
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
@@ -786,7 +788,7 @@ impl super::Backend for Backend {
         limit: usize,
     ) -> Result<Vec<Value>> {
         let (min, max) = lex_bounds(0.0, min, max);
-        self.z_range_impl(key, min, max, limit, true, true).await
+        self.zh_range_impl(key, min, max, limit, true, true).await
     }
 
     #[tracing::instrument(skip_all, fields(consumed_rcu, consistent = !self.allow_eventually_consistent_reads, error.msg, otel.status_code, otel.span_kind = "client"))]
