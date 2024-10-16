@@ -297,8 +297,7 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
             match self.inner.exec_batch(op).await {
                 Ok(_) => {
                     for get in gets {
-                        let l = get.value.lock().expect("GetInner should not be poisoned");
-                        self.store(get.key.unredacted.as_bytes().into(), Entry::Get(l.clone()));
+                        self.store(get.key.unredacted.as_bytes().into(), Entry::Get(get.value.get().cloned()));
                     }
                     Ok(())
                 }

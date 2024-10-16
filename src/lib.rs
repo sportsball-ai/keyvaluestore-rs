@@ -333,14 +333,12 @@ pub struct GetResult(Arc<GetInner>);
 
 struct GetInner {
     key: ExplicitKey<'static>,
-    value: std::sync::Mutex<Option<Value>>,
+    value: std::sync::OnceLock<Value>,
 }
 
 impl GetInner {
     fn put(&self, value: Value) {
-        let mut l = self.value.lock().expect("GetInner should not be poisoned");
-        assert!(l.is_none(), "GetInner should not be double-put");
-        *l = Some(value);
+        self.value.set(value).expect("GetInner should not be double-put");
     }
 }
 
@@ -348,7 +346,7 @@ impl GetResult {
     fn new(key: ExplicitKey<'static>) -> (Self, Arc<GetInner>) {
         let inner = Arc::new(GetInner {
             key,
-            value: std::sync::Mutex::new(None),
+            value: std::sync::OnceLock::new(),
         });
         (Self(inner.clone()), inner.clone())
     }
@@ -357,8 +355,8 @@ impl GetResult {
     ///
     /// Panics if the corresponding `exec_batch` operation has not been completed.
     pub fn into_parts(self) -> (ExplicitKey<'static>, Option<Value>) {
-        let inner = Arc::into_inner(self.0).expect("exec_batch should be completed first");
-        (inner.key, inner.value.into_inner().expect("GetResult should not be poisoned"))
+        let mut inner = Arc::into_inner(self.0).expect("exec_batch should be completed first");
+        (inner.key, inner.value.take())
     }
 }
 
