@@ -305,7 +305,6 @@ impl Backend {
     }
 
     async fn zh_rem_impl<'a, 'b, F: Into<Arg<'b>> + Send>(&self, key: ExplicitKey<'a>, field: F) -> Result<()> {
-        let key = key.into();
         let span = tracing::Span::current();
         span.record("key", tracing::field::debug(&key));
 
@@ -792,7 +791,7 @@ impl super::Backend for Backend {
     }
 
     #[tracing::instrument(skip_all, fields(consumed_rcu, consistent = !self.allow_eventually_consistent_reads, error.msg, otel.status_code, otel.span_kind = "client"))]
-    async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
+    async fn exec_batch(&self, op: BatchOperation) -> Result<()> {
         if op.ops.is_empty() {
             return Ok(());
         }
@@ -801,15 +800,15 @@ impl super::Backend for Backend {
             .ops
             .iter()
             .map(|op| match op {
-                BatchSubOperation::Get(key, _) => composite_key(&key, NO_SORT_KEY),
+                BatchSubOperation::Get(get) => composite_key(&get.0.key, NO_SORT_KEY),
             })
             .collect();
 
-        let txs: HashMap<&[u8], _> = op
+        let gets: HashMap<&[u8], _> = op
             .ops
             .iter()
             .map(|op| match op {
-                BatchSubOperation::Get(key, tx) => (key.unredacted.as_bytes(), tx),
+                BatchSubOperation::Get(get) => (get.0.key.unredacted.as_bytes(), get),
             })
             .collect();
 
@@ -840,18 +839,11 @@ impl super::Backend for Backend {
                         AttributeValue::B(b) => Some(b.into_inner().into()),
                         _ => None,
                     }) {
-                        match item
-                            .remove("hk")
-                            .and_then(|hk| match hk {
-                                AttributeValue::B(b) => txs.get(b.as_ref()),
-                                _ => None,
-                            })
-                            .map(|tx| tx.try_send(v))
-                        {
-                            Some(Ok(_)) => {}
-                            Some(Err(mpsc::TrySendError::Disconnected(_))) => {}
-                            Some(Err(e)) => return Err(e.into()),
-                            None => {}
+                        if let Some(get) = item.remove("hk").and_then(|hk| match hk {
+                            AttributeValue::B(b) => gets.get(b.as_ref()),
+                            _ => None,
+                        }) {
+                            get.0.put(v);
                         }
                     }
                 }

@@ -145,7 +145,7 @@ impl super::Backend for Backend {
         dispatch!(self, backend, { backend.z_rev_range_by_lex(key, min, max, limit) })
     }
 
-    async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
+    async fn exec_batch(&self, op: BatchOperation) -> Result<()> {
         dispatch!(self, backend, { backend.exec_batch(op) })
     }
 

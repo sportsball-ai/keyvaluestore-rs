@@ -270,12 +270,12 @@ impl super::Backend for Backend {
         }
     }
 
-    async fn exec_batch(&self, op: BatchOperation<'_>) -> Result<()> {
+    async fn exec_batch(&self, op: BatchOperation) -> Result<()> {
         let keys: Vec<_> = op
             .ops
             .iter()
             .map(|op| match op {
-                BatchSubOperation::Get(key, _) => key,
+                BatchSubOperation::Get(get) => &get.0.key,
             })
             .collect();
         match keys.len() {
@@ -283,11 +283,7 @@ impl super::Backend for Backend {
             1 => {
                 if let Some(v) = self.get_connection().await?.get(keys[0]).await? {
                     match &op.ops[0] {
-                        BatchSubOperation::Get(_, tx) => match tx.try_send(v) {
-                            Ok(_) => {}
-                            Err(mpsc::TrySendError::Disconnected(_)) => {}
-                            Err(e) => return Err(e.into()),
-                        },
+                        BatchSubOperation::Get(get) => get.0.put(v),
                     }
                 }
             }
@@ -295,11 +291,7 @@ impl super::Backend for Backend {
                 let values: Vec<Option<Value>> = self.get_connection().await?.get(keys).await?;
                 for op in op.ops.into_iter().zip(values) {
                     match op {
-                        (BatchSubOperation::Get(_, tx), Some(v)) => match tx.try_send(v) {
-                            Ok(_) => {}
-                            Err(mpsc::TrySendError::Disconnected(_)) => {}
-                            Err(e) => return Err(e.into()),
-                        },
+                        (BatchSubOperation::Get(get), Some(v)) => get.0.put(v),
                         (_, None) => {}
                     }
                 }
