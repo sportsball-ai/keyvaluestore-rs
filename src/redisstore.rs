@@ -48,7 +48,7 @@ impl Backend {
     async fn zh_range_by_score_impl<'a, K: Key<'a>>(mut conn: Connection, cmd: &'static str, key: K, start: f64, end: f64, limit: usize) -> Result<Vec<Value>> {
         let key = key.into();
 
-        let script = vec![
+        let script = [
             "local f = redis.call('",
             cmd,
             "', KEYS[1], unpack(ARGV))\n",
@@ -97,7 +97,7 @@ impl super::Backend for Backend {
         let value = value.into();
         let old_value = old_value.into();
         loop {
-            redis::cmd("WATCH").arg(&[&key]).query_async(&mut conn).await?;
+            redis::cmd("WATCH").arg(&[&key]).query_async::<_, ()>(&mut conn).await?;
             let mut pipe = redis::pipe();
             let pipe = pipe.atomic();
             let before: Option<Value> = conn.get(&key).await?;
@@ -109,7 +109,7 @@ impl super::Backend for Backend {
                     }
                 }
             }
-            redis::cmd("UNWATCH").query_async(&mut conn).await?;
+            redis::cmd("UNWATCH").query_async::<_, ()>(&mut conn).await?;
             return Ok(false);
         }
     }
@@ -401,8 +401,8 @@ impl super::Backend for Backend {
                 AtomicWriteSubOperation::HSet(key, fields) => {
                     let mut args = Vec::new();
                     for field in fields {
-                        args.push(field.0.into());
-                        args.push(field.1.into());
+                        args.push(field.0);
+                        args.push(field.1);
                     }
                     SubOp {
                         keys: vec![key.unredacted],
@@ -423,7 +423,7 @@ impl super::Backend for Backend {
                     failure_tx: Some(tx),
                 },
                 AtomicWriteSubOperation::HDel(key, fields) => {
-                    let args: Vec<_> = fields.into_iter().map(|f| f.into()).collect();
+                    let args: Vec<_> = fields.into_iter().collect();
                     SubOp {
                         keys: vec![key.unredacted],
                         condition: "true",

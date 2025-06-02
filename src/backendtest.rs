@@ -1,8 +1,8 @@
 #[macro_export]
 macro_rules! test_backend {
     ($f:expr) => {
-        use crate::{AtomicWriteOperation, Backend, BatchOperation};
         use std::ops::Bound;
+        use $crate::{AtomicWriteOperation, Backend, BatchOperation};
 
         #[tokio::test]
         #[serial]
@@ -414,7 +414,7 @@ macro_rules! test_backend {
 
             // DynamoDB has to paginate requests for z_counts on big sets.
             let mut big_value = Vec::new();
-            big_value.resize(1000, 'x' as u8);
+            big_value.resize(1000, b'x');
             for i in 0..1100 {
                 b.z_add("big", [i.to_string().as_bytes().to_vec(), big_value.clone()].concat(), 0.0)
                     .await
@@ -443,7 +443,7 @@ macro_rules! test_backend {
 
             // DynamoDB has to paginate requests for zh_counts on big sets.
             let mut big_value = Vec::new();
-            big_value.resize(1000, 'x' as u8);
+            big_value.resize(1000, b'x');
             for i in 0..1100 {
                 b.z_add("big", [i.to_string().as_bytes().to_vec(), big_value.clone()].concat(), 0.0)
                     .await

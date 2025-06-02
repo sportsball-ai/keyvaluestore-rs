@@ -23,6 +23,12 @@ pub struct Backend {
     m: Arc<Mutex<HashMap<Vec<u8>, MapEntry>>>,
 }
 
+impl Default for Backend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Backend {
     pub fn new() -> Self {
         Self {
@@ -59,19 +65,16 @@ impl Backend {
 
     fn s_rem<'a, 'b, V: Into<Arg<'b>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: ExplicitKey, value: V) -> Result<()> {
         let value = value.into();
-        match m.get_mut(key.unredacted.as_bytes()) {
-            Some(MapEntry::Set(s)) => {
-                s.remove(value.as_bytes());
-            }
-            _ => {}
+        if let Some(MapEntry::Set(s)) = m.get_mut(key.unredacted.as_bytes()) {
+            s.remove(value.as_bytes());
         }
         Ok(())
     }
 
-    fn n_incr_by<'a>(m: &mut HashMap<Vec<u8>, MapEntry>, key: ExplicitKey, n: i64) -> Result<i64> {
+    fn n_incr_by(m: &mut HashMap<Vec<u8>, MapEntry>, key: ExplicitKey, n: i64) -> Result<i64> {
         match m.get_mut(key.unredacted.as_bytes()) {
             Some(MapEntry::Value(v)) => {
-                let current: i64 = std::str::from_utf8(&v)?.parse()?;
+                let current: i64 = std::str::from_utf8(v)?.parse()?;
                 let n = current + n;
                 *v = n.to_string().as_bytes().to_vec();
                 Ok(n)
@@ -105,14 +108,11 @@ impl Backend {
     }
 
     fn h_del<'a, 'b, F: Into<Arg<'b>> + Send, I: IntoIterator<Item = F> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: ExplicitKey, fields: I) -> Result<()> {
-        match m.get_mut(key.unredacted.as_bytes()) {
-            Some(MapEntry::Map(m)) => {
-                for field in fields.into_iter() {
-                    let field = field.into();
-                    m.remove(field.as_bytes());
-                }
+        if let Some(MapEntry::Map(m)) = m.get_mut(key.unredacted.as_bytes()) {
+            for field in fields.into_iter() {
+                let field = field.into();
+                m.remove(field.as_bytes());
             }
-            _ => {}
         }
         Ok(())
     }
@@ -152,19 +152,16 @@ impl Backend {
 
     fn zh_rem<'a, 'b, F: Into<Arg<'b>> + Send>(m: &mut HashMap<Vec<u8>, MapEntry>, key: ExplicitKey, field: F) -> Result<()> {
         let field = field.into();
-        match m.get_mut(key.unredacted.as_bytes()) {
-            Some(MapEntry::SortedSet(s)) => {
-                if let Some(&previous_score) = s.scores_by_member.get(field.as_bytes()) {
-                    s.scores_by_member.remove(field.as_bytes());
-                    s.m.remove(&[&float_sort_key(previous_score), field.as_bytes()].concat());
-                }
+        if let Some(MapEntry::SortedSet(s)) = m.get_mut(key.unredacted.as_bytes()) {
+            if let Some(&previous_score) = s.scores_by_member.get(field.as_bytes()) {
+                s.scores_by_member.remove(field.as_bytes());
+                s.m.remove(&[&float_sort_key(previous_score), field.as_bytes()].concat());
             }
-            _ => {}
         }
         Ok(())
     }
 
-    fn delete<'a>(m: &mut HashMap<Vec<u8>, MapEntry>, key: ExplicitKey) -> bool {
+    fn delete(m: &mut HashMap<Vec<u8>, MapEntry>, key: ExplicitKey) -> bool {
         m.remove(key.unredacted.as_bytes()).is_some()
     }
 }
@@ -219,20 +216,18 @@ impl super::Backend for Backend {
 
     async fn set<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
         let mut m = self.m.lock().unwrap();
-        Ok(Self::set(&mut m, key.into(), value))
+        Self::set(&mut m, key.into(), value);
+        Ok(())
     }
 
     async fn set_eq<'a, 'b, 'c, K: Key<'a>, V: Into<Arg<'b>> + Send, OV: Into<Arg<'c>> + Send>(&self, key: K, value: V, old_value: OV) -> Result<bool> {
         let mut m = self.m.lock().unwrap();
         let key = key.into();
-        match m.get(key.unredacted.as_bytes()) {
-            Some(MapEntry::Value(v)) => {
-                if *v == old_value.into().as_bytes() {
-                    m.insert(key.unredacted.into_vec(), MapEntry::Value(value.into().into_vec()));
-                    return Ok(true);
-                }
+        if let Some(MapEntry::Value(v)) = m.get(key.unredacted.as_bytes()) {
+            if *v == old_value.into().as_bytes() {
+                m.insert(key.unredacted.into_vec(), MapEntry::Value(value.into().into_vec()));
+                return Ok(true);
             }
-            _ => {}
         }
         Ok(false)
     }
@@ -406,8 +401,8 @@ impl super::Backend for Backend {
             _ => return Ok(vec![]),
         };
 
-        let min = map_bound(min, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
-        let max = map_bound(max, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
+        let min = map_bound(min, |v| [&float_sort_key(0.0), v.into().as_bytes()].concat().to_vec());
+        let max = map_bound(max, |v| [&float_sort_key(0.0), v.into().as_bytes()].concat().to_vec());
 
         if let (Some(min), Some(max)) = (bound_value(&min), bound_value(&max)) {
             if min > max {
@@ -437,8 +432,8 @@ impl super::Backend for Backend {
             _ => return Ok(vec![]),
         };
 
-        let min = map_bound(min, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
-        let max = map_bound(max, |v| (&[&float_sort_key(0.0), v.into().as_bytes()]).concat().to_vec());
+        let min = map_bound(min, |v| [&float_sort_key(0.0), v.into().as_bytes()].concat().to_vec());
+        let max = map_bound(max, |v| [&float_sort_key(0.0), v.into().as_bytes()].concat().to_vec());
 
         if let (Some(min), Some(max)) = (bound_value(&min), bound_value(&max)) {
             if min > max {
