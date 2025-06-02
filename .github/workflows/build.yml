@@ -9,6 +9,8 @@ jobs:
         uses: actions/checkout@v4
       - name: Test
         run: |
+          docker compose run dev cargo clippy --all-features -- -D warnings
+          docker compose run dev cargo clippy --no-default-features -- -D warnings
+          docker compose run dev cargo clippy --no-default-features --features redis -- -D warnings
+
           docker compose run dev cargo test --all-features
-          docker compose run dev cargo test --no-default-features
-          docker compose run dev cargo test --no-default-features --features redis
