@@ -5,8 +5,10 @@ jobs:
     name: Build
     runs-on: ubuntu-24.04
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-    - name: Test
-      run: |
-        docker compose run dev cargo test --all-features
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Test
+        run: |
+          docker compose run dev cargo test --all-features
+          docker compose run dev cargo test --no-default-features
+          docker compose run dev cargo test --no-default-features --features redis
