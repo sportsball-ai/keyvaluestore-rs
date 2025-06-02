@@ -23,8 +23,6 @@ pub mod readcache;
 #[cfg(feature = "redis")]
 pub mod redisstore;
 
-use tracing::Span;
-
 #[derive(Debug)]
 pub enum Error {
     // AtomicWriteConflict happens when an atomic write fails due to contention (but not due to a
@@ -146,7 +144,7 @@ pub enum Arg<'a> {
 impl<'a> Arg<'a> {
     pub fn as_bytes(&self) -> &[u8] {
         match self {
-            Self::Owned(v) => &v,
+            Self::Owned(v) => v,
             Self::Borrowed(v) => v,
         }
     }
@@ -173,45 +171,45 @@ impl<'a> Arg<'a> {
     }
 }
 
-impl Into<Arg<'static>> for Vec<u8> {
-    fn into(self) -> Arg<'static> {
-        Arg::Owned(self)
+impl From<Vec<u8>> for Arg<'static> {
+    fn from(val: Vec<u8>) -> Self {
+        Arg::Owned(val)
     }
 }
 
-impl<'a> Into<Arg<'a>> for &'a Arg<'a> {
-    fn into(self) -> Arg<'a> {
-        Arg::Borrowed(self.as_bytes())
+impl<'a> From<&'a Arg<'a>> for Arg<'a> {
+    fn from(val: &'a Arg<'a>) -> Self {
+        Arg::Borrowed(val.as_bytes())
     }
 }
 
-impl<'a> Into<Arg<'a>> for &'a Vec<u8> {
-    fn into(self) -> Arg<'a> {
-        Arg::Borrowed(&self)
+impl<'a> From<&'a Vec<u8>> for Arg<'a> {
+    fn from(val: &'a Vec<u8>) -> Self {
+        Arg::Borrowed(val)
     }
 }
 
-impl<'a> Into<Arg<'a>> for &'a [u8] {
-    fn into(self) -> Arg<'a> {
-        Arg::Borrowed(self)
+impl<'a> From<&'a [u8]> for Arg<'a> {
+    fn from(val: &'a [u8]) -> Self {
+        Arg::Borrowed(val)
     }
 }
 
-impl<'a> Into<Arg<'a>> for &'a str {
-    fn into(self) -> Arg<'a> {
-        Arg::Borrowed(self.as_bytes())
+impl<'a> From<&'a str> for Arg<'a> {
+    fn from(val: &'a str) -> Self {
+        Arg::Borrowed(val.as_bytes())
     }
 }
 
-impl Into<Arg<'static>> for String {
-    fn into(self) -> Arg<'static> {
-        Arg::Owned(self.into_bytes())
+impl From<String> for Arg<'static> {
+    fn from(val: String) -> Self {
+        Arg::Owned(val.into_bytes())
     }
 }
 
-impl<'a> Into<Arg<'a>> for &'a String {
-    fn into(self) -> Arg<'a> {
-        Arg::Borrowed(self.as_bytes())
+impl<'a> From<&'a String> for Arg<'a> {
+    fn from(val: &'a String) -> Self {
+        Arg::Borrowed(val.as_bytes())
     }
 }
 
@@ -271,6 +269,7 @@ pub trait Backend {
     async fn delete<'a, K: Key<'a>>(&self, key: K) -> Result<bool>;
 
     async fn s_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
+    async fn s_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
     async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>>;
 
     /// Increments the number with the given key by some number, returning the new value. If the
@@ -366,13 +365,14 @@ pub enum BatchSubOperation {
 
 pub struct BatchGet(Arc<GetInner>);
 
+#[derive(Default)]
 pub struct BatchOperation {
     pub ops: Vec<BatchSubOperation>,
 }
 
 impl BatchOperation {
     pub fn new() -> Self {
-        Self { ops: vec![] }
+        Self::default()
     }
 
     pub fn get<K: Key<'static>>(&mut self, key: K) -> GetResult {
@@ -418,13 +418,14 @@ pub enum AtomicWriteSubOperation<'a> {
 // limit.
 pub const MAX_ATOMIC_WRITE_SUB_OPERATIONS: usize = 25;
 
+#[derive(Default)]
 pub struct AtomicWriteOperation<'a> {
     pub ops: Vec<AtomicWriteSubOperation<'a>>,
 }
 
 impl<'a> AtomicWriteOperation<'a> {
     pub fn new() -> Self {
-        Self { ops: vec![] }
+        Self::default()
     }
 
     pub fn set<'k: 'a, 'v: 'a, K: Key<'k>, V: Into<Arg<'v>> + Send>(&mut self, key: K, value: V) {
@@ -510,16 +511,19 @@ impl<'a> AtomicWriteOperation<'a> {
     }
 }
 
+#[cfg(feature = "aws-sdk")]
 pub(crate) fn add_err_to_span(e: &(dyn std::error::Error + Sync + Send + 'static)) {
-    let span = Span::current();
+    let span = tracing::Span::current();
     span.record("otel.status_code", "ERROR");
     span.record("error.msg", e);
 }
 
+#[cfg(feature = "aws-sdk")]
 pub(crate) trait ResultExt {
     fn spanify_err(self) -> Self;
 }
 
+#[cfg(feature = "aws-sdk")]
 impl<T, E: std::error::Error + Sync + Send + 'static> ResultExt for std::result::Result<T, E> {
     fn spanify_err(self) -> Self {
         if let Err(ref e) = self {

@@ -87,11 +87,11 @@ impl<'a> ArgBound<'a> {
     }
 }
 
-impl<'a> Into<Bound<Arg<'a>>> for ArgBound<'a> {
-    fn into(self) -> Bound<Arg<'a>> {
-        match self {
-            Self::Inclusive(a) => Bound::Included(a),
-            Self::Unbounded => Bound::Unbounded,
+impl<'a> From<ArgBound<'a>> for Bound<Arg<'a>> {
+    fn from(val: ArgBound<'a>) -> Self {
+        match val {
+            ArgBound::<'a>::Inclusive(a) => Bound::Included(a),
+            ArgBound::<'a>::Unbounded => Bound::Unbounded,
         }
     }
 }
@@ -156,9 +156,9 @@ fn encode_field_name(name: &[u8]) -> String {
     "~".to_string() + &base64::encode_config(name, base64::URL_SAFE_NO_PAD)
 }
 
-fn decode_field_name(name: &String) -> Option<Vec<u8>> {
-    if name.starts_with('~') {
-        base64::decode_config(&name[1..], base64::URL_SAFE_NO_PAD).ok()
+fn decode_field_name(name: &str) -> Option<Vec<u8>> {
+    if let Some(no_prefix_name) = name.strip_prefix('~') {
+        base64::decode_config(no_prefix_name, base64::URL_SAFE_NO_PAD).ok()
     } else {
         None
     }
@@ -191,7 +191,7 @@ impl Backend {
             }
         }
 
-        let (condition, attribute_values) = query_condition(key.into(), inclusive_min, inclusive_max, secondary_index);
+        let (condition, attribute_values) = query_condition(key, inclusive_min, inclusive_max, secondary_index);
 
         let mut query = self
             .client
@@ -276,7 +276,6 @@ impl Backend {
         value: V,
         score: f64,
     ) -> Result<()> {
-        let key = key.into();
         let span = tracing::Span::current();
         span.record("key", tracing::field::debug(&key));
 
@@ -291,7 +290,7 @@ impl Backend {
                 &field,
                 vec![
                     ("v", attribute_value(&value)),
-                    ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
+                    ("rk2", attribute_value([&float_sort_key(score), field.as_bytes()].concat())),
                 ],
             )))
             .return_consumed_capacity(ReturnConsumedCapacity::Total)
@@ -332,7 +331,7 @@ impl Backend {
         span.record("key", tracing::field::debug(&key));
 
         let (min, max) = score_bounds(min, max);
-        let (condition, attribute_values) = query_condition(key.into(), min, max, true);
+        let (condition, attribute_values) = query_condition(key, min, max, true);
 
         let mut query = self
             .client
@@ -515,6 +514,26 @@ impl super::Backend for Backend {
 
         record_wcu(&result.consumed_capacity, &span);
 
+        Ok(())
+    }
+
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    async fn s_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        let v = AttributeValue::Bs(vec![Blob::new(value.into().into_vec())]);
+        let result = self
+            .client
+            .update_item()
+            .table_name(self.table_name.clone())
+            .set_key(Some(composite_key(&key, NO_SORT_KEY)))
+            .update_expression("DELETE v :v")
+            .expression_attribute_values(":v", v)
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .spanify_err()?;
+        record_wcu(&result.consumed_capacity, &span);
         Ok(())
     }
 
@@ -831,7 +850,7 @@ impl super::Backend for Backend {
                 .spanify_err()?;
 
             for c in result.consumed_capacity.iter().flatten() {
-                cap.add_as_rcu(&c);
+                cap.add_as_rcu(c);
             }
             if let Some(items) = result.responses.and_then(|mut r| r.remove(&self.table_name)) {
                 for mut item in items {
@@ -860,8 +879,7 @@ impl super::Backend for Backend {
     }
 
     async fn exec_atomic_write(&self, op: AtomicWriteOperation<'_>) -> Result<bool> {
-        let mut token = Vec::new();
-        token.resize(20, 0u8);
+        let mut token = vec![0; 20];
         rand::thread_rng().fill_bytes(&mut token);
         let token = base64::encode_config(token, base64::URL_SAFE_NO_PAD);
 
@@ -1093,7 +1111,7 @@ impl super::Backend for Backend {
                                     &value,
                                     vec![
                                         ("v", attribute_value(&value)),
-                                        ("rk2", attribute_value(&[&float_sort_key(score), value.as_bytes()].concat())),
+                                        ("rk2", attribute_value([&float_sort_key(score), value.as_bytes()].concat())),
                                     ],
                                 )))
                                 .build()?,
@@ -1127,7 +1145,7 @@ impl super::Backend for Backend {
                                     &field,
                                     vec![
                                         ("v", attribute_value(&value)),
-                                        ("rk2", attribute_value(&[&float_sort_key(score), field.as_bytes()].concat())),
+                                        ("rk2", attribute_value([&float_sort_key(score), field.as_bytes()].concat())),
                                     ],
                                 )))
                                 .build()?,
@@ -1341,7 +1359,7 @@ impl super::Backend for Backend {
                     }
 
                     state.span.record("otel.status_code", "ERROR");
-                    state.span.record("error.code", &code);
+                    state.span.record("error.code", code);
                     if let Some(msg) = &reason.message {
                         state.span.record("error.msg", msg.clone());
                     }
@@ -1356,7 +1374,7 @@ impl super::Backend for Backend {
             Ok(r) => {
                 let mut cap = TotalConsumedCapacity::default();
                 for c in r.consumed_capacity.iter().flatten() {
-                    cap.add_rcu_and_wcu(&c);
+                    cap.add_rcu_and_wcu(c);
                 }
                 cap.record_to(&Span::current());
                 Ok(true)
@@ -1481,7 +1499,7 @@ mod test {
 
             let table_name = "BackendTest";
 
-            if let Ok(_) = client.delete_table().table_name(table_name).send().await {
+            if client.delete_table().table_name(table_name).send().await.is_ok() {
                 for _ in 0..10u32 {
                     match client.describe_table().table_name(table_name).send().await.map_err(|e| e.into_service_error()) {
                         Err(DescribeTableError::ResourceNotFoundException(_)) => break,
@@ -1490,7 +1508,7 @@ mod test {
                 }
             }
 
-            aws_sdk_dynamodbstore::create_default_table(&client, &table_name)
+            aws_sdk_dynamodbstore::create_default_table(&client, table_name)
                 .await
                 .expect("failed to create table");
 

@@ -57,6 +57,10 @@ impl super::Backend for Backend {
         dispatch!(self, backend, { backend.s_add(key, value) })
     }
 
+    async fn s_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        dispatch!(self, backend, { backend.s_rem(key, value) })
+    }
+
     async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
         dispatch!(self, backend, { backend.s_members(key) })
     }
