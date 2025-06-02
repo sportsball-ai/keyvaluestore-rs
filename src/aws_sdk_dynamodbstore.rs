@@ -518,6 +518,26 @@ impl super::Backend for Backend {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, err(Display), fields(key, consumed_wcu, otel.status_code, error.msg, otel.span_kind = "client"))]
+    async fn s_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        let key = key.into();
+        let span = tracing::Span::current();
+        let v = AttributeValue::Bs(vec![Blob::new(value.into().into_vec())]);
+        let result = self
+            .client
+            .update_item()
+            .table_name(self.table_name.clone())
+            .set_key(Some(composite_key(&key, NO_SORT_KEY)))
+            .update_expression("DELETE v :v")
+            .expression_attribute_values(":v", v)
+            .return_consumed_capacity(ReturnConsumedCapacity::Total)
+            .send()
+            .await
+            .spanify_err()?;
+        record_wcu(&result.consumed_capacity, &span);
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, fields(key, consistent = !self.allow_eventually_consistent_reads, consumed_rcu, otel.status_code, error.msg, otel.span_kind = "client"))]
     async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
         let key = key.into();

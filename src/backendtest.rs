@@ -68,6 +68,26 @@ macro_rules! test_backend {
 
         #[tokio::test]
         #[serial]
+        async fn test_s_rem() {
+            let b = ($f)().await;
+
+            b.s_add("foo", "bar").await.unwrap();
+            b.s_add("foo", "baz").await.unwrap();
+            b.s_add("foo", "zam").await.unwrap();
+            b.s_rem("foo", "bar").await.unwrap();
+            let mut members = b.s_members("foo").await.unwrap();
+            members.sort();
+            assert_eq!(vec!["baz", "zam"], members);
+            b.s_rem("foo", "baz").await.unwrap();
+            let members = b.s_members("foo").await.unwrap();
+            assert_eq!(vec!["zam"], members);
+            b.s_rem("foo", "zam").await.unwrap();
+            let members = b.s_members("foo").await.unwrap();
+            assert!(members.is_empty());
+        }
+
+        #[tokio::test]
+        #[serial]
         async fn test_n_incr_by() {
             let b = ($f)().await;
 

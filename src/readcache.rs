@@ -115,6 +115,13 @@ impl<B: super::Backend + Send + Sync> super::Backend for Backend<B> {
         r
     }
 
+    async fn s_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        let key = key.into();
+        let r = self.inner.s_rem(&key, value).await;
+        self.invalidate(key.unredacted.as_bytes());
+        r
+    }
+
     async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
         let key = key.into();
         match self.load(&key.unredacted) {

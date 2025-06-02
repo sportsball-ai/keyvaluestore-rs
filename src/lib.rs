@@ -271,6 +271,7 @@ pub trait Backend {
     async fn delete<'a, K: Key<'a>>(&self, key: K) -> Result<bool>;
 
     async fn s_add<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
+    async fn s_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()>;
     async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>>;
 
     /// Increments the number with the given key by some number, returning the new value. If the

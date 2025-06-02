@@ -258,6 +258,11 @@ impl super::Backend for Backend {
         Self::s_add(&mut m, key.into(), value)
     }
 
+    async fn s_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        let mut m = self.m.lock().unwrap();
+        Self::s_rem(&mut m, key.into(), value)
+    }
+
     async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
         let m = self.m.lock().unwrap();
         let key = key.into();

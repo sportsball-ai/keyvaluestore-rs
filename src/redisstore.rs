@@ -127,6 +127,10 @@ impl super::Backend for Backend {
         Ok(self.get_connection().await?.sadd(key.into(), value.into()).await?)
     }
 
+    async fn s_rem<'a, 'b, K: Key<'a>, V: Into<Arg<'b>> + Send>(&self, key: K, value: V) -> Result<()> {
+        Ok(self.get_connection().await?.srem(key.into(), value.into()).await?)
+    }
+
     async fn s_members<'a, K: Key<'a>>(&self, key: K) -> Result<Vec<Value>> {
         Ok(self.get_connection().await?.smembers(key.into()).await?)
     }
