@@ -1,7 +1,7 @@
 use crate::ExplicitKey;
 
 use super::{Arg, AtomicWriteOperation, AtomicWriteSubOperation, BatchOperation, BatchSubOperation, Key, Result, Value, MAX_ATOMIC_WRITE_SUB_OPERATIONS};
-use redis::{aio::Connection, AsyncCommands, Client, FromRedisValue, RedisResult, RedisWrite, Script, ToRedisArgs};
+use redis::{aio::MultiplexedConnection, AsyncCommands, Client, FromRedisValue, ParsingError, RedisWrite, Script, ToRedisArgs, ToSingleRedisArg};
 use simple_error::SimpleError;
 use std::{collections::HashMap, ops::Bound, sync::mpsc};
 
@@ -15,8 +15,8 @@ impl Backend {
         Self { client }
     }
 
-    async fn get_connection(&self) -> Result<Connection> {
-        Ok(self.client.get_async_connection().await?)
+    async fn get_connection(&self) -> Result<MultiplexedConnection> {
+        Ok(self.client.get_multiplexed_async_connection().await?)
     }
 }
 
@@ -26,18 +26,22 @@ impl<'a> ToRedisArgs for Arg<'a> {
     }
 }
 
+impl<'a> ToSingleRedisArg for Arg<'a> {}
+
 impl<'a> ToRedisArgs for ExplicitKey<'a> {
     fn write_redis_args<W: RedisWrite + ?Sized>(&self, out: &mut W) {
         out.write_arg(self.unredacted.as_bytes())
     }
 }
 
+impl<'a> ToSingleRedisArg for ExplicitKey<'a> {}
+
 impl FromRedisValue for Value {
-    fn from_redis_value(v: &redis::Value) -> RedisResult<Self> {
+    fn from_redis_value(v: redis::Value) -> std::result::Result<Self, ParsingError> {
         Ok(match v {
             redis::Value::Int(n) => n.to_string().as_bytes().to_vec().into(),
-            redis::Value::Data(v) => v.clone().into(),
-            _ => return Err((redis::ErrorKind::TypeError, "unexpected redis value type").into()),
+            redis::Value::BulkString(v) => v.into(),
+            _ => return Err("unexpected redis value type".into()),
         })
     }
 }
@@ -45,7 +49,14 @@ impl FromRedisValue for Value {
 const ZH_HASH_KEY_PREFIX: &str = "__kvs_zh:";
 
 impl Backend {
-    async fn zh_range_by_score_impl<'a, K: Key<'a>>(mut conn: Connection, cmd: &'static str, key: K, start: f64, end: f64, limit: usize) -> Result<Vec<Value>> {
+    async fn zh_range_by_score_impl<'a, K: Key<'a>>(
+        mut conn: MultiplexedConnection,
+        cmd: &'static str,
+        key: K,
+        start: f64,
+        end: f64,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
         let key = key.into();
 
         let script = [
@@ -97,19 +108,19 @@ impl super::Backend for Backend {
         let value = value.into();
         let old_value = old_value.into();
         loop {
-            redis::cmd("WATCH").arg(&[&key]).query_async::<_, ()>(&mut conn).await?;
+            redis::cmd("WATCH").arg(&[&key]).query_async::<()>(&mut conn).await?;
             let mut pipe = redis::pipe();
             let pipe = pipe.atomic();
             let before: Option<Value> = conn.get(&key).await?;
             if let Some(before) = before {
                 if before.as_bytes() == old_value.as_bytes() {
-                    match pipe.set(&key, &value).ignore().query_async::<_, Option<()>>(&mut conn).await? {
+                    match pipe.set(&key, &value).ignore().query_async::<Option<()>>(&mut conn).await? {
                         None => continue,
                         Some(_) => return Ok(true),
                     }
                 }
             }
-            redis::cmd("UNWATCH").query_async::<_, ()>(&mut conn).await?;
+            redis::cmd("UNWATCH").query_async::<()>(&mut conn).await?;
             return Ok(false);
         }
     }
@@ -175,7 +186,7 @@ impl super::Backend for Backend {
             .zadd(&key, &field, score)
             .hset([ZH_HASH_KEY_PREFIX.as_bytes(), key.unredacted.as_bytes()].concat(), &field, &value)
             .ignore()
-            .query_async::<_, Option<()>>(&mut conn)
+            .query_async::<Option<()>>(&mut conn)
             .await?;
         Ok(())
     }
@@ -189,7 +200,7 @@ impl super::Backend for Backend {
             .zrem(&key, &field)
             .hdel([ZH_HASH_KEY_PREFIX.as_bytes(), key.unredacted.as_bytes()].concat(), &field)
             .ignore()
-            .query_async::<_, Option<()>>(&mut conn)
+            .query_async::<Option<()>>(&mut conn)
             .await?;
         Ok(())
     }
@@ -292,7 +303,7 @@ impl super::Backend for Backend {
                 }
             }
             _ => {
-                let values: Vec<Option<Value>> = self.get_connection().await?.get(keys).await?;
+                let values: Vec<Option<Value>> = self.get_connection().await?.mget(keys).await?;
                 for op in op.ops.into_iter().zip(values) {
                     match op {
                         (BatchSubOperation::Get(get), Some(v)) => get.0.put(v),
@@ -519,20 +530,11 @@ fn preprocess_atomic_write_expression(expr: &str, keys_offset: usize, num_keys: 
 mod test {
     mod backend {
         use crate::{redisstore, test_backend};
-        use redis::{Client, ConnectionAddr, ConnectionInfo, RedisConnectionInfo};
+        use redis::{Client, IntoConnectionInfo as _};
 
         test_backend!(|| async {
-            let addr = std::env::var("REDIS_ADDRESS").unwrap_or("127.0.0.1".to_string());
-            let addr: Vec<_> = addr.split(':').collect();
-            let client = Client::open(ConnectionInfo {
-                addr: ConnectionAddr::Tcp(addr[0].to_string(), addr.get(1).map(|p| p.parse().unwrap()).unwrap_or(6379)),
-                redis: RedisConnectionInfo {
-                    db: 1,
-                    username: None,
-                    password: None,
-                },
-            })
-            .unwrap();
+            let addr = std::env::var("REDIS_ADDRESS").unwrap_or("redis://127.0.0.1".to_string());
+            let client = Client::open(addr.into_connection_info().expect("redis URL parse failure")).unwrap();
             let mut conn = client.get_connection().unwrap();
             redis::cmd("FLUSHDB").query::<()>(&mut conn).unwrap();
             redisstore::Backend::new(client)
